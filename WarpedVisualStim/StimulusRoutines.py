@@ -2310,6 +2310,13 @@ class DriftingGratingCircle(Stim):
         self.smooth_func = smooth_func
         self.is_random_start_phase = is_random_start_phase
 
+        # --- tracking for analysis ---
+        self.all_conditions = None                   # cartesian set, unshuffled
+        self.all_conditions_shuffled = None          # order used by generate_frames()
+        self.condi_key_to_params = None              # map: 'condi_0003' -> (sf, tf, dire, con, radius)
+        self.condition_orders_keys = []              # per-iteration list of condi keys (movie_by_index path)
+        self.condition_orders_params = []            # same order, but as parameter tuples
+
         if int(block_dur * self.monitor.refresh_rate) >= 4:
             self.block_dur = float(block_dur)
         else:
@@ -2461,7 +2468,9 @@ class DriftingGratingCircle(Stim):
                 frames += [off_params for ind in range(self.midgap_frame_num)]
 
             all_conditions = self._generate_all_conditions()
+            self.all_conditions = list(all_conditions)                       # <-- add
             random.shuffle(all_conditions)
+            self.all_conditions_shuffled = list(all_conditions)              # <-- add
 
             for j, condition in enumerate(all_conditions):
                 if j != 0:  # later conditions
@@ -2592,6 +2601,14 @@ class DriftingGratingCircle(Stim):
                 frames_unique += list(condi_dict[condi_key]['frames_unique'])
                 condi_ind_in_frames_unique.update(
                     {condi_key: list(curr_index_to_display_condi + curr_frames_unique_total)})
+            
+            # build key -> params map once (blank/gap excluded)
+            self.condi_key_to_params = {}
+            for k, v in condi_dict.items():
+                frs = v['frames_unique']
+                if frs and frs[0][0] == 1:  # display frames, not the gap
+                    # any phase frame holds the same (sf, tf, dire, con, radius)
+                    self.condi_key_to_params[k] = frs[0][2:7]
 
             return frames_unique, condi_ind_in_frames_unique
         else:
@@ -2606,12 +2623,21 @@ class DriftingGratingCircle(Stim):
         if self.is_random_start_phase:
 
             frames_unique = []
+            self.condition_orders_keys = []          # <-- add
+            self.condition_orders_params = []        # <-- add
 
             for iter in range(self.iteration):
 
                 frames_unique_iter, condi_ind_in_frames_unique = self._generate_frames_unique_and_condi_ind_dict()
                 condi_keys = list(condi_ind_in_frames_unique.keys())
                 np.random.shuffle(condi_keys)
+
+                # record realized order for this iteration
+                self.condition_orders_keys.append(list(condi_keys))          # <-- add
+                if self.condi_key_to_params:
+                    self.condition_orders_params.append(
+                        [self.condi_key_to_params[k] for k in condi_keys])   # <-- add
+
 
                 for condi_ind, condi in enumerate(condi_keys):
 
@@ -2630,8 +2656,18 @@ class DriftingGratingCircle(Stim):
             frames_unique, condi_ind_in_frames_unique = self._generate_frames_unique_and_condi_ind_dict()
             condi_keys = list(condi_ind_in_frames_unique.keys())
 
+            self.condition_orders_keys = []          # <-- add
+            self.condition_orders_params = []        # <-- add
+
             for iter in range(self.iteration):
                 np.random.shuffle(condi_keys)
+
+                # record realized order for this iteration
+                self.condition_orders_keys.append(list(condi_keys))          # <-- add
+                if self.condi_key_to_params:
+                    self.condition_orders_params.append(
+                        [self.condi_key_to_params[k] for k in condi_keys])   # <-- add
+                
                 for condi_ind, condi in enumerate(condi_keys):
 
                     # add gap frames
@@ -2702,13 +2738,22 @@ class DriftingGratingCircle(Stim):
             mov[i, indicator_height_min:indicator_height_max,
             indicator_width_min:indicator_width_max] = frame[-1]
 
+
+        self_dict = dict(self.__dict__)
+        for k in ('monitor', 'indicator', 'smooth_func'):
+            self_dict.pop(k, None)
+
+        # attach condition metadata (works for both paths)
+        self_dict['all_conditions'] = list(self._generate_all_conditions())
+        self_dict['all_conditions_shuffled'] = getattr(self, 'all_conditions_shuffled', None)
+        self_dict['condi_key_to_params'] = getattr(self, 'condi_key_to_params', None)
+        self_dict['condition_orders_keys'] = getattr(self, 'condition_orders_keys', None)
+        self_dict['condition_orders_params'] = getattr(self, 'condition_orders_params', None)
+
         mondict = dict(self.monitor.__dict__)
         indicator_dict = dict(self.indicator.__dict__)
         indicator_dict.pop('monitor')
-        self_dict = dict(self.__dict__)
-        self_dict.pop('monitor')
-        self_dict.pop('indicator')
-        self_dict.pop('smooth_func')
+        
         log = {'stimulation': self_dict,
                'monitor': mondict,
                'indicator': indicator_dict}
@@ -2798,16 +2843,25 @@ class DriftingGratingCircle(Stim):
                        str(int(100 * (i + 1) / len(self.frames))) + '%')
 
         # generate log dictionary
+        self_dict = dict(self.__dict__)
+        for k in ('monitor', 'indicator', 'smooth_func'):
+            self_dict.pop(k, None)
+
+        # attach condition metadata (works for both paths)
+        self_dict['all_conditions'] = list(self._generate_all_conditions())
+        self_dict['all_conditions_shuffled'] = getattr(self, 'all_conditions_shuffled', None)
+        self_dict['condi_key_to_params'] = getattr(self, 'condi_key_to_params', None)
+        self_dict['condition_orders_keys'] = getattr(self, 'condition_orders_keys', None)
+        self_dict['condition_orders_params'] = getattr(self, 'condition_orders_params', None)
+
         mondict = dict(self.monitor.__dict__)
         indicator_dict = dict(self.indicator.__dict__)
         indicator_dict.pop('monitor')
-        self_dict = dict(self.__dict__)
-        self_dict.pop('monitor')
-        self_dict.pop('indicator')
-        self_dict.pop('smooth_func')
+        
         log = {'stimulation': self_dict,
                'monitor': mondict,
                'indicator': indicator_dict}
+
 
         return mov, log
 

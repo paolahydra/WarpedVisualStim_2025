@@ -64,3 +64,4 @@ venv/
 *.hdf5
 10
 75.8.1
+.DS_Store
