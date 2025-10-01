@@ -61,3 +61,6 @@ dis/
 WarpedVisualStim.egg-info/
 *.egg
 venv/
+*.hdf5
+10
+75.8.1

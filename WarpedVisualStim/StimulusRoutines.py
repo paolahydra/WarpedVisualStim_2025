@@ -3327,12 +3327,12 @@ class StaticImages(Stim):
                              'downsampled monitor.')
 
         try:
-            alt_w = img_f['images_wrapped/altitude'].value
+            alt_w = img_f['images_wrapped/altitude'][()]
         except:
             alt_w = None
 
         try:
-            azi_w = img_f['images_wrapped/azimuth'].value
+            azi_w = img_f['images_wrapped/azimuth'][()]
         except:
             azi_w = None
 
@@ -3345,7 +3345,7 @@ class StaticImages(Stim):
                 raise ValueError('the azimuth coordinates of input wrapped images do not '
                                  'match the wrapped monitor pixel azimuth coordinates.')
 
-        self.images_wrapped = img_f['images_wrapped/images'].value
+        self.images_wrapped = img_f['images_wrapped/images'][()]
 
         if 'images_dewrapped' in img_f:
             if not img_f['images_dewrapped/images'].shape != 3:
@@ -3362,9 +3362,9 @@ class StaticImages(Stim):
                 self.altitude_dewrapped = None
                 self.azimuth_dewrapped = None
             else:
-                self.images_dewrapped = img_f['images_dewrapped/images'].value
+                self.images_dewrapped = img_f['images_dewrapped/images'][()]
                 try:
-                    alt_d = img_f['images_dewrapped/altitude'].value
+                    alt_d = img_f['images_dewrapped/altitude'][()]
                     if alt_d.shape[0] != self.images_dewrapped.shape[1] or \
                                     alt_d.shape[1] != self.images_dewrapped.shape[2]:
                         print ('altitude coordinates of images_dewrapped in the input file have '
@@ -3377,7 +3377,7 @@ class StaticImages(Stim):
                     self.altitude_dewrapped = None
 
                 try:
-                    azi_d = img_f['images_dewrapped/azimuth'].value
+                    azi_d = img_f['images_dewrapped/azimuth'][()]
                     if azi_d.shape[0] != self.images_dewrapped.shape[1] or \
                                     azi_d.shape[1] != self.images_dewrapped.shape[2]:
                         print ('azimuth coordinates of images_dewrapped in the input file have '
