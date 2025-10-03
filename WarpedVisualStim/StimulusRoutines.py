@@ -250,47 +250,6 @@ def get_grating(alt_map, azi_map, dire=0., spatial_freq=0.1,
     return grating
 
 
-# def get_sparse_loc_num_per_frame(min_alt, max_alt, min_azi, max_azi, minimum_dis):
-#     """
-#     given the subregion of visual space and the minmum distance between the probes
-#     within a frame (definition of sparseness), return generously how many probes
-#     will be presented of a given frame
-#
-#     Parameters
-#     ----------
-#     min_alt : float
-#         minimum altitude of display region, in visual degrees
-#     max_alt : float
-#         maximum altitude of display region, in visual degrees
-#     min_azi : float
-#         minimum azimuth of display region, in visual degrees
-#     max_azi : float
-#         maximum azimuth of display region, in visual degrees
-#     minimum_dis : float
-#         minimum distance allowed among probes within a frame
-#
-#     returns
-#     -------
-#     probe_num_per_frame : uint
-#         generously how many probes will be presented in a given frame
-#     """
-#     if min_alt >= max_alt:
-#         raise ValueError('min_alt should be less than max_alt.')
-#
-#     if min_azi >= max_azi:
-#         raise ValueError('min_azi should be less than max_azi.')
-#
-#     min_alt = float(min_alt)
-#     max_alt = float(max_alt)
-#     min_azi = float(min_azi)
-#     max_azi = float(max_azi)
-#
-#     area_tot = (max_alt - min_alt) * (max_azi - min_azi)
-#     area_circle = np.pi * (minimum_dis ** 2)
-#     probe_num_per_frame = int(np.ceil((2.0 * (area_tot / area_circle))))
-#     return probe_num_per_frame
-
-
 def get_grid_locations(subregion, grid_space, monitor_azi, monitor_alt, is_include_edge=True,
                        is_plot=False):
     """
@@ -4358,7 +4317,6 @@ class KSstimAllDir(object):
         return mov, log
 
 
-#%%
 class KSstimSeqDir(object):
     """
     generate Kalatsky & Stryker stimulation in direction sequence as specified
@@ -4480,6 +4438,7 @@ class KSstimSeqDir(object):
         }
 
         return mov, log
+
 
 class DriftingGratingMultipleCircle(Stim):
     """
@@ -5135,3 +5094,275 @@ class DriftingGratingMultipleCircle(Stim):
                'indicator': indicator_dict}
 
         return mov, log
+    
+
+    import numpy as np
+
+class RandomizedUniformFlashes(Stim):
+    """
+    Randomized two-color full-field flashes with user-defined repetitions and ISI.
+
+    Parameters
+    ----------
+    monitor : monitor object
+        Display monitor info (needs .refresh_rate and degree grid as in Stim).
+    indicator : indicator object
+        Indicator/sync info.
+    flash_dur : float
+        Duration (s) of each flash.
+    midgap_dur : float
+        Inter-stimulus interval (s) between flashes (i.e., gap between offset and the next onset).
+        Can be 0.
+    n_reps : int
+        Number of flashes to present.
+    colors : tuple(float, float), optional
+        Two color values in [-1, 1] (e.g., (-1., 1.) = black/white).
+    pregap_dur : float, optional
+        Pre-stimulus gap (s). Default 2.
+    postgap_dur : float, optional
+        Post-stimulus gap (s). Default 3.
+    background : float, optional
+        Background level in [-1, 1]. Default 0 (gray).
+    coordinate : {'degree','linear'}, optional
+        As in Stim. Default 'degree'.
+    rng_seed : int or None, optional
+        Seed for reproducible randomization. Default None.
+    balance_colors : bool, optional
+        If True, enforce equal counts (or off-by-one if n_reps is odd) then shuffle.
+        If False, draw each flash i.i.d. with p=0.5. Default False.
+
+    Notes
+    -----
+    - frames_unique (for index mode) encodes tuples of:
+        (is_display, indicator_value, display_color)
+      with three unique “states”: GAP, COLOR_A, COLOR_B.
+    - index_to_display holds the randomized timeline over these unique states.
+    """
+
+    def __init__(self, monitor, indicator,
+                 flash_dur, midgap_dur, n_reps,
+                 colors=(-1., 1.), pregap_dur=2., postgap_dur=3.,
+                 background=0., coordinate='degree',
+                 rng_seed=None, balance_colors=False):
+
+        super(RandomizedUniformFlashes, self).__init__(monitor=monitor,
+                                                       indicator=indicator,
+                                                       coordinate=coordinate,
+                                                       background=background,
+                                                       pregap_dur=pregap_dur,
+                                                       postgap_dur=postgap_dur)
+
+        # ---- Parameters
+        self.stim_name = 'RandomizedUniformFlashes'
+        self.flash_dur = float(flash_dur)
+        self.midgap_dur = float(midgap_dur)
+        self.n_reps = int(n_reps)
+        assert isinstance(colors, (tuple, list)) and len(colors) == 2, "colors must be a 2-tuple/list"
+        self.colors = (float(colors[0]), float(colors[1]))
+        self.rng_seed = rng_seed
+        self.balance_colors = bool(balance_colors)
+
+        # Derived frame counts
+        rr = self.monitor.refresh_rate
+        self.flash_frame_num = max(1, int(round(self.flash_dur * rr)))
+        self.midgap_frame_num = max(0, int(round(self.midgap_dur * rr)))
+
+        # Frame config: (is_display, indicator, display_color)
+        self.frame_config = ('is_display', 'indicator color [-1., 1.]', 'display color [-1., 1.]')
+
+        # Build the randomized schedule now
+        self._build_random_schedule()
+
+    # ------------------------------ Core helpers ------------------------------
+
+    def _build_random_schedule(self):
+        """Construct the randomized per-flash color order and the index timeline."""
+        # Choose color per flash
+        rng = np.random.RandomState(self.rng_seed)
+        c0, c1 = self.colors
+
+        if self.balance_colors:
+            n0 = self.n_reps // 2
+            n1 = self.n_reps - n0
+            color_seq = np.array([c0] * n0 + [c1] * n1, dtype=np.float32)
+            rng.shuffle(color_seq)
+        else:
+            # i.i.d. p=0.5 per flash
+            choices = rng.randint(0, 2, size=self.n_reps)
+            color_seq = np.where(choices == 0, c0, c1).astype(np.float32)
+
+        self._color_seq = color_seq  # length n_reps
+
+        # Build index timeline (referring to frames_unique = [GAP, COL0, COL1])
+        # We will create: pregap  -> [flash -> midgap] x n_reps  -> postgap
+        # gap index = 0, colorA index = 1, colorB index = 2
+        gap_idx, colA_idx, colB_idx = 0, 1, 2
+
+        timeline = []
+        # Pre-gap
+        timeline += [gap_idx] * self.pregap_frame_num
+
+        # Flashes
+        for k in range(self.n_reps):
+            # Flash block
+            if np.isclose(self._color_seq[k], self.colors[0]):
+                timeline += [colA_idx] * self.flash_frame_num
+            else:
+                timeline += [colB_idx] * self.flash_frame_num
+
+            # Mid-gap (skip after last flash if you want strictly no gap—here we keep it symmetric)
+            if self.midgap_frame_num > 0 and (k < self.n_reps - 1):
+                timeline += [gap_idx] * self.midgap_frame_num
+
+        # Post-gap
+        timeline += [gap_idx] * self.postgap_frame_num
+
+        self.index_to_display = timeline
+
+    # ------------------------------ Index-mode generation ------------------------------
+
+    def _generate_frames_for_index_display(self):
+        """Define the three unique indexable frames: GAP, COLOR_A, COLOR_B."""
+        if not self.indicator.is_sync:
+            raise NotImplementedError("method not available for non-sync indicator.")
+
+        # Unique states: GAP, COL_A, COL_B
+        # Tuple: (is_display, indicator_value, display_color)
+        frames = (
+            (0, -1., 0.0),                   # GAP: is_display=0, indicator=-1, color ignored
+            (1,  1., float(self.colors[0])), # COLOR_A
+            (1,  1., float(self.colors[1])), # COLOR_B
+        )
+        return frames
+
+    def _generate_display_index(self):
+        """Return the precomputed (randomized) index timeline."""
+        # Already constructed in _build_random_schedule
+        return self.index_to_display
+
+    def generate_movie_by_index(self):
+        """Compute the stimulus 'unique frames' and the randomized index list."""
+        self.frames_unique = self._generate_frames_for_index_display()
+        self.index_to_display = self._generate_display_index()
+
+        num_frames = len(self.frames_unique)
+        num_pixels_width = self.monitor.deg_coord_x.shape[0]
+        num_pixels_height = self.monitor.deg_coord_x.shape[1]
+
+        # Allocate the unique frames tensor
+        full_sequence = np.ones((num_frames,
+                                 num_pixels_width,
+                                 num_pixels_height),
+                                dtype=np.float32) * self.background
+
+        # Indicator ROI
+        iw_min, iw_max, ih_min, ih_max = self.get_indicator_range()
+
+        # Pre-build plane images
+        background_plane = np.ones((num_pixels_width, num_pixels_height), dtype=np.float32) * self.background
+        colA_plane = np.ones_like(background_plane) * float(self.colors[0])
+        colB_plane = np.ones_like(background_plane) * float(self.colors[1])
+
+        # Build the unique frames:
+        #  index 0 -> GAP frame (background + indicator=-1)
+        #  index 1 -> COLOR_A frame (colorA + indicator=+1)
+        #  index 2 -> COLOR_B frame (colorB + indicator=+1)
+        # GAP
+        full_sequence[0, :, :] = background_plane
+        full_sequence[0, ih_min:ih_max, iw_min:iw_max] = -1.
+
+        # COLOR_A
+        full_sequence[1, :, :] = colA_plane
+        full_sequence[1, ih_min:ih_max, iw_min:iw_max] = 1.
+
+        # COLOR_B
+        full_sequence[2, :, :] = colB_plane
+        full_sequence[2, ih_min:ih_max, iw_min:iw_max] = 1.
+
+        # Package metadata
+        monitor_dict = dict(self.monitor.__dict__)
+        indicator_dict = dict(self.indicator.__dict__)
+        NF_dict = dict(self.__dict__)
+        NF_dict.pop('monitor')
+        NF_dict.pop('indicator')
+
+        # Include the actual randomized color sequence used (per flash), with timing in frames
+        NF_dict['color_sequence_per_flash'] = self._color_seq.tolist()
+        NF_dict['flash_frame_num'] = self.flash_frame_num
+        NF_dict['midgap_frame_num'] = self.midgap_frame_num
+
+        full_dict = {'stimulation': NF_dict,
+                     'monitor': monitor_dict,
+                     'indicator': indicator_dict}
+
+        return full_sequence, full_dict
+
+    # ------------------------------ Frame-by-frame fallback ------------------------------
+
+    def generate_frames(self):
+        """
+        Return per-frame parameter tuples (is_display, indicator, display_color).
+        Mostly useful for non-index rendering or debugging.
+        """
+        rr = self.monitor.refresh_rate
+        frames = []
+
+        # Pre-gap
+        frames += [(0, -1., 0.0)] * self.pregap_frame_num
+
+        # Flashes with mid-gaps
+        for k in range(self.n_reps):
+            color_k = float(self._color_seq[k])
+            frames += [(1, 1., color_k)] * self.flash_frame_num
+            if self.midgap_frame_num > 0 and (k < self.n_reps - 1):
+                frames += [(0, -1., 0.0)] * self.midgap_frame_num
+
+        # Post-gap
+        frames += [(0, -1., 0.0)] * self.postgap_frame_num
+
+        return tuple(frames)
+
+    def generate_movie(self):
+        """
+        Frame-by-frame movie (slower; mainly for debug or non-index pipelines).
+        """
+        self.frames = self.generate_frames()
+
+        H = self.monitor.deg_coord_x.shape[0]
+        W = self.monitor.deg_coord_x.shape[1]
+        full_seq = np.zeros((len(self.frames), H, W), dtype=np.float32)
+
+        iw_min, iw_max, ih_min, ih_max = self.get_indicator_range()
+
+        if not (self.coordinate == 'degree' or self.coordinate == 'linear'):
+            raise LookupError("`coordinate` value not in {'degree','linear'}")
+
+        background_plane = np.ones((H, W), dtype=np.float32) * self.background
+
+        for i, (is_disp, ind_val, disp_col) in enumerate(self.frames):
+            if is_disp == 0:
+                frame = background_plane.copy()
+            else:
+                frame = np.ones((H, W), dtype=np.float32) * float(disp_col)
+
+            frame[ih_min:ih_max, iw_min:iw_max] = ind_val
+            full_seq[i] = frame
+
+            if i in range(0, len(self.frames), max(1, len(self.frames)//10)):
+                print(f'Generating numpy sequence: {int(100*(i+1)/len(self.frames))}%')
+
+        mondict = dict(self.monitor.__dict__)
+        indicator_dict = dict(self.indicator.__dict__)
+        indicator_dict.pop('monitor')
+        NFdict = dict(self.__dict__)
+        NFdict.pop('monitor')
+        NFdict.pop('indicator')
+        NFdict['color_sequence_per_flash'] = self._color_seq.tolist()
+        NFdict['flash_frame_num'] = self.flash_frame_num
+        NFdict['midgap_frame_num'] = self.midgap_frame_num
+
+        full_dict = {'stimulation': NFdict,
+                     'monitor': mondict,
+                     'indicator': indicator_dict}
+
+        return full_seq, full_dict
