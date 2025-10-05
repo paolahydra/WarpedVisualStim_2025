@@ -5244,6 +5244,8 @@ class RandomizedUniformFlashes(Stim):
         """Compute the stimulus 'unique frames' and the randomized index list."""
         self.frames_unique = self._generate_frames_for_index_display()
         self.index_to_display = self._generate_display_index()
+        self._last_generated = "index"
+        print("index mode")
 
         num_frames = len(self.frames_unique)
         num_pixels_width = self.monitor.deg_coord_x.shape[0]
@@ -5327,6 +5329,8 @@ class RandomizedUniformFlashes(Stim):
         Frame-by-frame movie (slower; mainly for debug or non-index pipelines).
         """
         self.frames = self.generate_frames()
+        self._last_generated = "frame"
+        print("frame-by-frame mode")
 
         H = self.monitor.deg_coord_x.shape[0]
         W = self.monitor.deg_coord_x.shape[1]
