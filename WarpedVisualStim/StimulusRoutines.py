@@ -2997,6 +2997,9 @@ class StaticGratingCircle(Stim):
         if self.is_blank_block:
             all_conditions.append((0., 0., 0., 0., 0.))
 
+        # NEW: keep a copy for logging
+        self._all_conditions = list(all_conditions)
+
         return all_conditions
 
     def _generate_frames_for_index_display(self):
@@ -3057,6 +3060,12 @@ class StaticGratingCircle(Stim):
 
             # remove the extra mid gap
             index_to_display = index_to_display[self.midgap_frame_num:]
+
+            # NEW: keep for logging
+            self._frames_unique_compact = [tuple(f) for f in frames_unique]
+            self._index_to_display = list(index_to_display)
+            self._display_frame_num = int(display_frame_num)
+            self._midgap_frame_num   = int(self.midgap_frame_num)
 
             return frames_unique, index_to_display
         else:
@@ -3122,14 +3131,32 @@ class StaticGratingCircle(Stim):
 
         mondict = dict(self.monitor.__dict__)
         indicator_dict = dict(self.indicator.__dict__)
-        indicator_dict.pop('monitor')
+        indicator_dict.pop('monitor', None)
+
         self_dict = dict(self.__dict__)
-        self_dict.pop('monitor')
-        self_dict.pop('indicator')
-        self_dict.pop('smooth_func')
+        # remove non-serializable / bulky entries
+        self_dict.pop('monitor', None)
+        self_dict.pop('indicator', None)
+        self_dict.pop('smooth_func', None)
+
+        # NEW: add compact, explicit fields for downstream analysis
+        self_dict['frame_config']         = tuple(self.frame_config)
+        self_dict['all_conditions']       = getattr(self, '_all_conditions', None)
+        self_dict['frames_unique_compact']= getattr(self, '_frames_unique_compact', None)
+        self_dict['index_to_display']     = getattr(self, '_index_to_display', None)
+        self_dict['display_frame_num']    = getattr(self, '_display_frame_num', self.display_frame_num)
+        self_dict['midgap_frame_num']     = getattr(self, '_midgap_frame_num', self.midgap_frame_num)
+
+        # Optional: also log a per-condition frame count for convenience
+        self_dict['frames_per_condition'] = {
+            'indicator_on':  self._display_frame_num // 2 if hasattr(self, '_display_frame_num') else self.display_frame_num // 2,
+            'indicator_off': self._display_frame_num - (self._display_frame_num // 2) if hasattr(self, '_display_frame_num') else self.display_frame_num - (self.display_frame_num // 2),
+            'midgap':        self_dict['midgap_frame_num']
+        }
+
         log = {'stimulation': self_dict,
-               'monitor': mondict,
-               'indicator': indicator_dict}
+            'monitor': mondict,
+            'indicator': indicator_dict}
 
         return mov, log
 
