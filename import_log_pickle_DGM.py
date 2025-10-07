@@ -43,10 +43,11 @@ def rebuild_all_conditions_if_missing(stim):
     dire_list = list(stim['dire_list'])
     con_list  = list(stim['con_list'])
     radius_list = list(stim['radius_list'])
-    return list(product(sf_list, tf_list, dire_list, con_list, radius_list))  # (sf, tf, dire, con, radius)
+    center_list  = list(stim['center_list'])
+    return list(product(sf_list, tf_list, dire_list, con_list, radius_list, center_list))  # (sf, tf, dire, con, radius, center)
 
 # --- usage ---
-obj  = load_log(r'D:\data\displaySequence\visual_display_log\251001070359-DriftingGratingCircle-MTest-Name-000-notTriggered-complete.pkl')
+obj  = load_log(r'D:\data\displaySequence\visual_display_log\251002102615-DriftingGratingMultipleCircle-MTest-Name-000-notTriggered-complete.pkl')
 stim = get_stimulation(obj)
 
 # stim is your full metadata dict (center, lists, timing, flags, etc.)
@@ -61,35 +62,18 @@ orders_keys   = stim.get('condition_orders_keys', None)    # same, but as condi_
 
 
 import pandas as pd
-df = pd.DataFrame(all_conditions, columns=['sf','tf','direction','contrast','radius'])
-df.to_csv("/path/to/all_conditions.csv", index=False)
+df = pd.DataFrame(all_conditions, columns=['sf','tf','direction','contrast','radius', 'center'])
+df.to_csv(r'D:\data\displaySequence\visual_display_log\251002102615-DriftingGratingMultipleCircle-MTest-Name-000-notTriggered-complete_condition_order.csv', index=False)
 
 # If realized orders are present:
 if orders_params:
     rows = []
     for it, conds in enumerate(orders_params):
-        for pos, (sf, tf, dire, con, rad) in enumerate(conds):
+        for pos, (sf, tf, dire, con, rad, cen) in enumerate(conds):
             rows.append({'iteration': it, 'position': pos,
                          'sf': sf, 'tf': tf, 'direction': dire,
-                         'contrast': con, 'radius': rad})
-    pd.DataFrame(rows).to_csv("/path/to/condition_order.csv", index=False)
-
-
-
-
-import pandas as pd
-df = pd.DataFrame(all_conditions, columns=['sf','tf','direction','contrast','radius'])
-df.to_csv('D:\data\displaySequence\visual_display_log\251001070359-DriftingGratingCircle-MTest-Name-000-notTriggered_all_conditions.csv', index=False)
-
-# If realized orders are present:
-if orders_params:
-    rows = []
-    for it, conds in enumerate(orders_params):
-        for pos, (sf, tf, dire, con, rad) in enumerate(conds):
-            rows.append({'iteration': it, 'position': pos,
-                         'sf': sf, 'tf': tf, 'direction': dire,
-                         'contrast': con, 'radius': rad})
-    pd.DataFrame(rows).to_csv("/path/to/condition_order.csv", index=False)
+                         'contrast': con, 'radius': rad, 'center': cen})
+    pd.DataFrame(rows).to_csv(r'D:\data\displaySequence\visual_display_log\251002102615-DriftingGratingMultipleCircle-MTest-Name-000-notTriggered-complete_condition_order.csv', index=False)
 
 
 
