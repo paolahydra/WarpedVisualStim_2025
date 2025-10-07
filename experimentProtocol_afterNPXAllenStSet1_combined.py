@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import WarpedVisualStim as rm
 import WarpedVisualStim.StimulusRoutines as stim
 from WarpedVisualStim.DisplayStimulus import DisplaySequence
 from WarpedVisualStim.MonitorSetup import Monitor, Indicator
