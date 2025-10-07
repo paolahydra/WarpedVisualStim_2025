@@ -102,14 +102,13 @@ rf_center_list = [(10., 20.),(-10., 100.), (-10., 20.),(10., 100.)]
 rf_direlist = (0.,90.,180.,270.,)
 rf_iterationN = 1
 
-dgc = stim.DriftingGratingMultipleCircle(monitor=mon, indicator=ind, background=0.,
+rf = stim.DriftingGratingMultipleCircle(monitor=mon, indicator=ind, background=0.,
                                  coordinate='degree', center_list=rf_center_list, sf_list=(0.04,),
                                  tf_list=(2.0,), dire_list=rf_direlist, con_list=(0.8,), radius_list=(20.,),
                                  block_dur=0.250, midgap_dur=0., iteration=rf_iterationN, pregap_dur=2.,
                                  postgap_dur=2., is_blank_block=False, is_random_start_phase=False)
-ds.set_stim(dgc)
-ds.trigger_display()
- # manage log for these stimuli
+# ds.set_stim(rf)
+# ds.trigger_display()
 
 
 # ================ Receptive field mapping - flashing stimuli ================ 
@@ -118,7 +117,7 @@ fl_color = (-0.8, 0.8)
 fl_pregap_dur = 2
 fl_postgap_dur = 2
 fl_midgap_dur = 0.250
-fl_reps = 15
+fl_reps = 5
 
 fl = stim.RandomizedUniformFlashes(
     monitor=mon,
@@ -134,41 +133,102 @@ fl = stim.RandomizedUniformFlashes(
     rng_seed=1234,         # reproducible order
     balance_colors=True    # enforce ~equal counts, then shuffle
 )
-ds.set_stim(fl)
-ds.trigger_display()
+# ds.set_stim(fl)
+# ds.trigger_display()
 
-# ================ full-field drifting gratings ================ 
+
+# ================ full-field Drifting Gratings ================ 
 dg_direlist = (0.,45.,90.,135.,180.,225.,270.,315.,)
 dg_iterationN = 15
-# both options last roughly 20-21 minutes
+# test:
+dg_direlist = (0.,45.,90.,135.,)
+dg_iterationN = 5
 
-dgc = stim.DriftingGratingCircle(monitor=mon, indicator=ind, background=0.,
+dg = stim.DriftingGratingCircle(monitor=mon, indicator=ind, background=0.,
                                  coordinate='degree', center=(0., 60.), sf_list=(0.04,),
                                  tf_list=(1.,2.,4.,8.,15.,), dire_list=rf_direlist, con_list=(0.8,), radius_list=(120.,),
                                  block_dur=2., midgap_dur=1., iteration=rf_iterationN, pregap_dur=2.,
                                  postgap_dur=2., is_blank_block=True, is_random_start_phase=False)
 
-ds.set_stim(dgc)
-ds.trigger_display()
+# ds.set_stim(dg)
+# ds.trigger_display()
 
 
-# ================ full-field static gratings ================ 
+# ================ full-field Static Gratings ================ 
 sg_orilist = (0.,30.,60.,90.,120.,150.,)
 sg_sflist = (0.02,0.04,0.08,0.16,0.32,)
 sg_phaselist = (0.,0.25,0.50,0.75)
 sg_iterationN = 50
-# both options last roughly 20-21 minutes
+# test:
+sg_orilist = (0.,150.,)
+sg_sflist = (0.02,0.32,)
+sg_phaselist = (0.,0.50,)
+sg_iterationN = 5
 
-dgc = stim.StaticGratingCircle(monitor=mon, indicator=ind, background=0.,
+sg = stim.StaticGratingCircle(monitor=mon, indicator=ind, background=0.,
                                 coordinate='degree', center=(0., 60.), sf_list=sg_sflist,
                                 ori_list=sg_orilist, con_list=(0.8,), radius_list=(120.,), 
                                 display_dur=0.250, midgap_dur=0., iteration=sg_iterationN, pregap_dur=2.,
                                 postgap_dur=2., is_blank_block=True, phase_list = sg_phaselist,)
 
-ds.set_stim(dgc)
-ds.trigger_display()
+# ds.set_stim(sg)
+# ds.trigger_display()
 
 
+# ============== Static Images ===================================
+si_img_center = (0., 60.)
+si_deg_per_pixel = (0.5, 0.5)
+si_display_dur = 0.250
+si_midgap_dur = 0.
+si_iteration = 2
+si_is_blank_block = True
+si_images_folder = os.path.join(os.path.dirname(rm.__file__), 'test', 'test_data')
+
+si = stim.StaticImages(monitor=mon, indicator=ind, pregap_dur=2,
+                       postgap_dur=2, coordinate='degree',
+                       background=0., img_center=si_img_center,
+                       deg_per_pixel=si_deg_per_pixel, display_dur=si_display_dur,
+                       midgap_dur=si_midgap_dur, iteration=si_iteration,
+                       is_blank_block=si_is_blank_block)
+
+print ('wrapping images ...')
+static_images_path = os.path.join(si_images_folder, 'wrapped_images_for_display.hdf5')
+if os.path.isfile(static_images_path):
+    os.remove(static_images_path)
+si.wrap_images(si_images_folder)
+
+
+# ======================= Stimulus Separator ======================================
+ss_indicator_on_frame_num = 4
+ss_indicator_off_frame_num = 4
+ss_cycle_num = 10
+ss = stim.StimulusSeparator(monitor=mon, indicator=ind, pregap_dur=2.,
+                            postgap_dur=2., coordinate='degree',
+                            background=0.,
+                            indicator_on_frame_num=ss_indicator_on_frame_num,
+                            indicator_off_frame_num=ss_indicator_off_frame_num,
+                            cycle_num=ss_cycle_num)
+# =================================================================================
+
+# ======================= Combined Stimuli ========================================
+cs_stim_ind_sequence = [0, 1, 2, 3, 4, 5]
+cs = stim.CombinedStimuli(monitor=mon, indicator=ind, pregap_dur=2.,
+                          postgap_dur=2., coordinate='degree',
+                          background=0.)
+# =================================================================================
+
+# ======================= Set Stimuli Sequence ====================================
+all_stim = [rf, fl, dg, sg, si, ss]
+stim_seq = [all_stim[stim_ind] for stim_ind in cs_stim_ind_sequence]
+cs.set_stimuli(stimuli=stim_seq, static_images_path=static_images_path)
+# =================================================================================
+
+# =============================== display =========================================
+ds.set_stim(cs)
+log_path, log_dict = ds.trigger_display()
+print(log_path)
+print(log_dict)
+# =============================== display =========================================
 
 
 # ================ other ================ 
