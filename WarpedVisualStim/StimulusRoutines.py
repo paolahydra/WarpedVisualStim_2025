@@ -3733,7 +3733,7 @@ class CombinedStimuli(Stim):
             if not stimulus.stim_name in ['UniformContrast', 'FlashingCircle', 'SparseNoise',
                                           'LocallySparseNoise', 'DriftingGratingCircle',
                                           'StaticGratingCircle', 'StaticImages', 'StimulusSeparator',
-                                          'SinusoidalLuminance']:
+                                          'SinusoidalLuminance', 'DriftingGratingMultipleCircle']:
                 raise LookupError('Stimulus type "{}" is not currently supported.'
                                   .format(stimulus.stim_name))
 
