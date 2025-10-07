@@ -5245,6 +5245,7 @@ class RandomizedUniformFlashes(Stim):
         timeline += [gap_idx] * self.postgap_frame_num
 
         self.index_to_display = timeline
+        print(timeline) #temp PP
 
     # ------------------------------ Index-mode generation ------------------------------
 
@@ -5265,6 +5266,7 @@ class RandomizedUniformFlashes(Stim):
     def _generate_display_index(self):
         """Return the precomputed (randomized) index timeline."""
         # Already constructed in _build_random_schedule
+        self._build_random_schedule() #added PP, should be conditional, but at least let's see if it fixes the call
         return self.index_to_display
 
     def generate_movie_by_index(self):
