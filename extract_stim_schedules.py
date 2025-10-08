@@ -82,13 +82,26 @@ def load_pickle(pkl_path):
     )
 
 def get_logs_container(data):
+    """
+    Return the mapping of {stim_name: stim_log} for this file layout.
+    For your file, logs are under data['stimulation']['individual_logs'].
+    Falls back to prior heuristics if that path isn't present.
+    """
+    from collections.abc import Mapping
+    # Preferred (observed) path:
     if isinstance(data, dict):
+        stim = data.get('stimulation', {})
+        if isinstance(stim, Mapping):
+            ilogs = stim.get('individual_logs', None)
+            if isinstance(ilogs, Mapping) and ilogs:
+                return ilogs
+
+    # Fallbacks (keep your earlier heuristics if you want robustness across files)
+    if isinstance(data, Mapping):
         for k in ("individual_logs","logs","log"):
-            if k in data and isinstance(data[k], dict):
-                return data[k]
-        # sometimes stimuli are at top-level dict already
-        return {k:v for k,v in data.items() if isinstance(k,str) and any(
-            s in k for s in ("Drifting","Static","Randomized","Images","Separator"))}
+            v = data.get(k)
+            if isinstance(v, Mapping) and v:
+                return v
     return None
 
 def find_sequence(d):
@@ -178,6 +191,122 @@ def extract_one(stim_name, stim_log):
             return pd.DataFrame([normalize_row(flat)])
     return pd.DataFrame()
 
+import pandas as pd
+
+def df_from_list_of_dicts(lst):
+    if not lst:
+        return pd.DataFrame()
+    if isinstance(lst[0], dict):
+        return pd.DataFrame(lst)
+    return pd.DataFrame({"value": lst})
+
+def extract_grating_trials(log_dict):
+    """
+    Handles DriftingGratingMultipleCircle / DriftingGratingCircle.
+    Prefers fully expanded per-trial lists, then key->param mapping, then shuffled conditions.
+    """
+    # 1) Already expanded per-trial params
+    for k in ("presentations","trials","trial_table","condition_orders_params"):
+        if k in log_dict and isinstance(log_dict[k], (list,tuple)) and log_dict[k]:
+            df = df_from_list_of_dicts(list(log_dict[k]))
+            df.insert(0, "trial", range(1, len(df)+1))
+            return df
+
+    # 2) Keys -> params mapping
+    if ("condition_orders_keys" in log_dict and
+        "condi_key_to_params" in log_dict and
+        isinstance(log_dict["condition_orders_keys"], (list,tuple)) and
+        isinstance(log_dict["condi_key_to_params"], dict)):
+        rows = []
+        for i, key in enumerate(log_dict["condition_orders_keys"], start=1):
+            params = log_dict["condi_key_to_params"].get(key, {})
+            row = {"trial": i, "cond_key": key}
+            if isinstance(params, dict):
+                row.update(params)
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    # 3) Shuffled full conditions (already randomized)
+    if "all_conditions_shuffled" in log_dict and isinstance(log_dict["all_conditions_shuffled"], (list,tuple)):
+        rows = []
+        for i, params in enumerate(log_dict["all_conditions_shuffled"], start=1):
+            row = {"trial": i}
+            if isinstance(params, dict):
+                row.update(params)
+            else:
+                row["condition"] = params
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    # 4) At least return the unique condition grid
+    if "all_conditions" in log_dict and isinstance(log_dict["all_conditions"], (list,tuple)):
+        df = df_from_list_of_dicts(list(log_dict["all_conditions"]))
+        df.insert(0, "grid_index", range(len(df)))
+        return df
+
+    return pd.DataFrame()
+
+def extract_static_grating_trials(log_dict):
+    """
+    Handles StaticGratingCircle.
+    Typical layout shows:
+      - iteration, display_dur, midgap_dur, is_blank_block
+      - _all_conditions: list of dicts describing parameter combos
+      - _frames_unique_compact: unique frames (parameter tuples)
+      - frame_config: sequence of indices (or dicts) referring to unique frames
+    Strategy:
+      1) If 'presentations' exists, use it.
+      2) If 'frame_config' + '_frames_unique_compact' exist, map indices -> params, build one row per frame.
+         If 'iteration' > 1, frame_config likely already encodes the repeated order; we just expand as given.
+      3) Else, fall back to '_all_conditions'.
+    """
+    # 1) Already expanded
+    for k in ("presentations","trials","trial_table"):
+        if k in log_dict and isinstance(log_dict[k], (list,tuple)) and log_dict[k]:
+            df = df_from_list_of_dicts(list(log_dict[k]))
+            df.insert(0, "row", range(1, len(df)+1))
+            return df
+
+    # 2) frame_config + _frames_unique_compact
+    fc = log_dict.get("frame_config", None)
+    uniq = log_dict.get("_frames_unique_compact", None)
+    if isinstance(fc, (list,tuple)) and isinstance(uniq, (list,tuple)) and len(uniq) > 0:
+        rows = []
+        for i, idx in enumerate(fc, start=1):
+            # idx may be integer or dict; handle both
+            if isinstance(idx, dict) and "frame_idx" in idx:
+                uix = idx["frame_idx"]
+            else:
+                uix = idx
+            params = {}
+            if isinstance(uix, int) and 0 <= uix < len(uniq):
+                u = uniq[uix]
+                if isinstance(u, dict):
+                    params.update(u)
+                else:
+                    params["frame_value"] = u
+            row = {"frame_row": i, "unique_frame_index": uix}
+            row.update(params)
+            rows.append(row)
+        df = pd.DataFrame(rows)
+        # Attach useful global fields if present
+        for k in ("display_dur","midgap_dur","iteration","is_blank_block","coordinate","background","center","sf_list","phase_list","ori_list","con_list","radius_list"):
+            if k in log_dict and k not in df.columns:
+                df[k] = log_dict[k]
+        return df
+
+    # 3) _all_conditions as fallback
+    if "_all_conditions" in log_dict and isinstance(log_dict["_all_conditions"], (list,tuple)):
+        df = df_from_list_of_dicts(list(log_dict["_all_conditions"]))
+        df.insert(0, "grid_index", range(len(df)))
+        for k in ("display_dur","midgap_dur","iteration","is_blank_block"):
+            if k in log_dict and k not in df.columns:
+                df[k] = log_dict[k]
+        return df
+
+    return pd.DataFrame()
+
+
 def main(pkl_path):
     data = load_pickle(pkl_path)
     logs = get_logs_container(data)
@@ -187,20 +316,38 @@ def main(pkl_path):
     out_dir.mkdir(exist_ok=True)
     written = []
     # logs may be keyed with numeric prefixes; preserve order if available
-    for stim_key in sorted(logs.keys()):
-        stim_log = logs[stim_key]
-        df = extract_one(stim_key, stim_log)
-        if df.empty:
-            df = enrich_with_known_fields(df, stim_log)
-        # carry best-effort timing columns to front if present
-        cols = list(df.columns)
-        time_cols = [c for c in TIMING_GUESS if c in cols]
-        other_cols = [c for c in cols if c not in time_cols]
-        df = df[time_cols + other_cols] if time_cols else df
-        # write
+    for stim_key, stim_log in sorted(logs.items()):
+        # Normalize class label (strip numeric prefix if present)
+        cls = stim_key.split("_", 1)[-1] if "_" in stim_key else stim_key
+
+        if cls in ("DriftingGratingMultipleCircle","DriftingGratingCircle"):
+            df = extract_grating_trials(stim_log)
+        elif cls == "StaticGratingCircle":
+            df = extract_static_grating_trials(stim_log)
+        elif cls in ("RandomizedUniformFlashes","StaticImages","StimulusSeparator"):
+            # Reuse generic path: try 'presentations', then grid+sequence if present
+            df = extract_grating_trials(stim_log)  # covers presentations / all_conditions_shuffled / keys->params
+            if df.empty and "_all_conditions" in stim_log:
+                df = df_from_list_of_dicts(list(stim_log["_all_conditions"]))
+                df.insert(0, "grid_index", range(len(df)))
+        else:
+            # Generic fallback
+            df = extract_grating_trials(stim_log)
+
+        # If still empty, add trace fields to help debugging
+        if df.empty and isinstance(stim_log, dict):
+            meta = {k: v for k, v in stim_log.items() if isinstance(v, (str, int, float, bool)) or v is None}
+            if meta:
+                df = pd.DataFrame([meta])
+
+        # Make lists CSV-friendly
+        for c in df.columns:
+            df[c] = df[c].apply(lambda x: tuple(x) if isinstance(x, list) else x)
+
         out_path = out_dir / f"{stim_key}_schedule.csv"
         df.to_csv(out_path, index=False)
         written.append(out_path)
+
     print("Wrote CSVs to:", out_dir)
     for p in written:
         print(" -", p)
