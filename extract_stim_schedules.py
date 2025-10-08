@@ -1,5 +1,5 @@
 # extract_stim_schedules.py
-import sys, pickle, pathlib, sys
+import sys, pickle, pathlib
 from collections import OrderedDict
 import pandas as pd
 
@@ -43,24 +43,43 @@ RENAMES = {
 }
 
 def load_pickle(pkl_path):
-    class SafeUnpickler(pickle.Unpickler):
-        ALLOWED = {
-            'builtins': {
-                'dict','list','tuple','set','frozenset','str','int','float','bool','bytes','bytearray',
-                'complex','range','slice'
-            },
-            'collections': {'OrderedDict'}
-        }
-        def find_class(self, module, name):
-            if module in self.ALLOWED and name in self.ALLOWED[module]:
-                return getattr(__import__(module, fromlist=[name]), name)
-            # fallback stub; we want dict/list payloads, not classes
-            class Stub:
-                def __init__(self, *a, **k): pass
-                def __repr__(self): return f"<{module}.{name} (stub)>"
-            return Stub
-    with open(pkl_path, 'rb') as f:
-        return SafeUnpickler(f).load()
+    # 1) Plain pickle
+    try:
+        with open(pkl_path, 'rb') as f:
+            return pickle.load(f)
+    except Exception as e1:
+        err1 = e1
+
+    # 2) Help NumPy alias mismatches sometimes seen in older pickles
+    try:
+        import numpy as np
+        sys.modules.setdefault('numpy._core', np.core)
+        with open(pkl_path, 'rb') as f:
+            return pickle.load(f)
+    except Exception as e2:
+        err2 = e2
+
+    # 3) pandas can be more forgiving (handles some compat cases)
+    try:
+        return pd.read_pickle(pkl_path)
+    except Exception as e3:
+        err3 = e3
+
+    # 4) dill fallback (pip install dill)
+    try:
+        import dill
+        with open(pkl_path, 'rb') as f:
+            return dill.load(f)
+    except Exception as e4:
+        err4 = e4
+
+    raise RuntimeError(
+        "Could not unpickle file.\n"
+        f"1) pickle.load -> {type(err1).__name__}: {err1}\n"
+        f"2) pickle.load (+numpy alias) -> {type(err2).__name__}: {err2}\n"
+        f"3) pandas.read_pickle -> {type(err3).__name__}: {err3}\n"
+        f"4) dill.load -> {type(err4).__name__}: {err4}"
+    )
 
 def get_logs_container(data):
     if isinstance(data, dict):
