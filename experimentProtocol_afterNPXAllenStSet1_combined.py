@@ -228,7 +228,7 @@ cs.set_stimuli(stimuli=stim_seq, static_images_path=static_images_path)
 ds.set_stim(cs)
 log_path, log_dict = ds.trigger_display()
 print(log_path)
-print(log_dict)
+
 # =============================== display =========================================
 
 
