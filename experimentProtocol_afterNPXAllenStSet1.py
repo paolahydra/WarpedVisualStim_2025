@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import WarpedVisualStim as rm
 import WarpedVisualStim.StimulusRoutines as stim
 from WarpedVisualStim.DisplayStimulus import DisplaySequence
 from WarpedVisualStim.MonitorSetup import Monitor, Indicator
@@ -74,102 +75,124 @@ ds = DisplaySequence(log_dir=ds_log_dir, backupdir=ds_backupdir,
                      color_weights=ds_color_weights)
 
 
-# ================ Receptive field mapping - drifting gratings gabor ================ 
+# # ================ Receptive field mapping - drifting gratings gabor ================ 
 
-# input center parameters
-x_range = (20.0, 100.0)   # [xmin, xmax]
-y_range = (15.0, -15.0)   # preserves given orientation (top→bottom)
-n = 9                     # how much you want to tile each axis
+# # input center parameters
+# x_range = (20.0, 100.0)   # [xmin, xmax]
+# y_range = (15.0, -15.0)   # preserves given orientation (top→bottom)
+# n = 9                     # how much you want to tile each axis
 
-# calculate grid of centers
-x_edges = np.linspace(x_range[0], x_range[1], n + 1)
-y_edges = np.linspace(y_range[0], y_range[1], n + 1)
-x_centers = (x_edges[:-1] + x_edges[1:]) / 2
-y_centers = (y_edges[:-1] + y_edges[1:]) / 2
-# n x n grid of centers, then flatten to list of tuples (x,y)
-Xc, Yc = np.meshgrid(x_centers, y_centers, indexing='xy')  # shape (9,9)
+# # calculate grid of centers
+# x_edges = np.linspace(x_range[0], x_range[1], n + 1)
+# y_edges = np.linspace(y_range[0], y_range[1], n + 1)
+# x_centers = (x_edges[:-1] + x_edges[1:]) / 2
+# y_centers = (y_edges[:-1] + y_edges[1:]) / 2
+# # n x n grid of centers, then flatten to list of tuples (x,y)
+# Xc, Yc = np.meshgrid(x_centers, y_centers, indexing='xy')  # shape (9,9)
 
-rf_center_list = list(map(tuple, np.column_stack([Xc.ravel(), Yc.ravel()])))
+# rf_center_list = list(map(tuple, np.column_stack([Xc.ravel(), Yc.ravel()])))
 
-rf_direlist = (0.,90.,180.,270., 45.,135.,225.,315.,)
-rf_iterationN = 8
-rf_direlist = (0.,90.,180.,270.,)
-rf_iterationN = 15
-# both options last roughly 20-21 minutes
+# rf_direlist = (0.,90.,180.,270., 45.,135.,225.,315.,)
+# rf_iterationN = 8
+# rf_direlist = (0.,90.,180.,270.,)
+# rf_iterationN = 15
+# # both options last roughly 20-21 minutes
 
-#test:
-rf_center_list = [(10., 20.),(-10., 100.), (-10., 20.),(10., 100.)]
-rf_direlist = (0.,90.,180.,270.,)
-rf_iterationN = 1
+# #test:
+# rf_center_list = [(10., 20.),(-10., 100.), (-10., 20.),(10., 100.)]
+# rf_direlist = (0.,90.,180.,270.,)
+# rf_iterationN = 1
 
-dgc = stim.DriftingGratingMultipleCircle(monitor=mon, indicator=ind, background=0.,
-                                 coordinate='degree', center_list=rf_center_list, sf_list=(0.04,),
-                                 tf_list=(2.0,), dire_list=rf_direlist, con_list=(0.8,), radius_list=(20.,),
-                                 block_dur=0.250, midgap_dur=0., iteration=rf_iterationN, pregap_dur=2.,
-                                 postgap_dur=2., is_blank_block=False, is_random_start_phase=False)
-ds.set_stim(dgc)
+# dgc = stim.DriftingGratingMultipleCircle(monitor=mon, indicator=ind, background=0.,
+#                                  coordinate='degree', center_list=rf_center_list, sf_list=(0.04,),
+#                                  tf_list=(2.0,), dire_list=rf_direlist, con_list=(0.8,), radius_list=(20.,),
+#                                  block_dur=0.250, midgap_dur=0., iteration=rf_iterationN, pregap_dur=2.,
+#                                  postgap_dur=2., is_blank_block=False, is_random_start_phase=False)
+# ds.set_stim(dgc)
+# ds.trigger_display()
+#  # manage log for these stimuli
+
+
+# # ================ Receptive field mapping - flashing stimuli ================ 
+# fl_duration = 0.250
+# fl_color = (-0.8, 0.8)
+# fl_pregap_dur = 2
+# fl_postgap_dur = 2
+# fl_midgap_dur = 0.250
+# fl_reps = 15
+
+# fl = stim.RandomizedUniformFlashes(
+#     monitor=mon,
+#     indicator=ind,
+#     flash_dur=fl_duration,    
+#     midgap_dur=fl_midgap_dur,    
+#     n_reps=fl_reps,            
+#     colors=fl_color,   
+#     pregap_dur=fl_pregap_dur,
+#     postgap_dur=fl_postgap_dur,
+#     background=0.0,
+#     coordinate='degree',
+#     rng_seed=1234,         # reproducible order
+#     balance_colors=True    # enforce ~equal counts, then shuffle
+# )
+# ds.set_stim(fl)
+# ds.trigger_display()
+
+# # ================ full-field drifting gratings ================ 
+# dg_direlist = (0.,45.,90.,135.,180.,225.,270.,315.,)
+# dg_iterationN = 15
+# # both options last roughly 20-21 minutes
+
+# dgc = stim.DriftingGratingCircle(monitor=mon, indicator=ind, background=0.,
+#                                  coordinate='degree', center=(0., 60.), sf_list=(0.04,),
+#                                  tf_list=(1.,2.,4.,8.,15.,), dire_list=rf_direlist, con_list=(0.8,), radius_list=(120.,),
+#                                  block_dur=2., midgap_dur=1., iteration=rf_iterationN, pregap_dur=2.,
+#                                  postgap_dur=2., is_blank_block=True, is_random_start_phase=False)
+
+# ds.set_stim(dgc)
+# ds.trigger_display()
+
+
+# # ================ full-field static gratings ================ 
+# sg_orilist = (0.,30.,60.,90.,120.,150.,)
+# sg_sflist = (0.02,0.04,0.08,0.16,0.32,)
+# sg_phaselist = (0.,0.25,0.50,0.75)
+# sg_iterationN = 50
+# # both options last roughly 20-21 minutes
+
+# dgc = stim.StaticGratingCircle(monitor=mon, indicator=ind, background=0.,
+#                                 coordinate='degree', center=(0., 60.), sf_list=sg_sflist,
+#                                 ori_list=sg_orilist, con_list=(0.8,), radius_list=(120.,), 
+#                                 display_dur=0.250, midgap_dur=0., iteration=sg_iterationN, pregap_dur=2.,
+#                                 postgap_dur=2., is_blank_block=True, phase_list = sg_phaselist,)
+
+# ds.set_stim(dgc)
+# ds.trigger_display()
+
+# ============== Static Images ===================================
+si_img_center = (0., 60.)
+si_deg_per_pixel = (0.5, 0.5)
+si_display_dur = 0.250
+si_midgap_dur = 0.
+si_iteration = 2
+si_is_blank_block = True
+si_images_folder = os.path.join(os.path.dirname(rm.__file__), 'test', 'test_data')
+
+si = stim.StaticImages(monitor=mon, indicator=ind, pregap_dur=2,
+                       postgap_dur=2, coordinate='degree',
+                       background=0., img_center=si_img_center,
+                       deg_per_pixel=si_deg_per_pixel, display_dur=si_display_dur,
+                       midgap_dur=si_midgap_dur, iteration=si_iteration,
+                       is_blank_block=si_is_blank_block)
+
+print ('wrapping images ...')
+static_images_path = os.path.join(si_images_folder, 'wrapped_images_for_display.hdf5')
+if os.path.isfile(static_images_path):
+    os.remove(static_images_path)
+si.wrap_images(si_images_folder)
+
+ds.set_stim(si)
 ds.trigger_display()
- # manage log for these stimuli
-
-
-# ================ Receptive field mapping - flashing stimuli ================ 
-fl_duration = 0.250
-fl_color = (-0.8, 0.8)
-fl_pregap_dur = 2
-fl_postgap_dur = 2
-fl_midgap_dur = 0.250
-fl_reps = 15
-
-fl = stim.RandomizedUniformFlashes(
-    monitor=mon,
-    indicator=ind,
-    flash_dur=fl_duration,    
-    midgap_dur=fl_midgap_dur,    
-    n_reps=fl_reps,            
-    colors=fl_color,   
-    pregap_dur=fl_pregap_dur,
-    postgap_dur=fl_postgap_dur,
-    background=0.0,
-    coordinate='degree',
-    rng_seed=1234,         # reproducible order
-    balance_colors=True    # enforce ~equal counts, then shuffle
-)
-ds.set_stim(fl)
-ds.trigger_display()
-
-# ================ full-field drifting gratings ================ 
-dg_direlist = (0.,45.,90.,135.,180.,225.,270.,315.,)
-dg_iterationN = 15
-# both options last roughly 20-21 minutes
-
-dgc = stim.DriftingGratingCircle(monitor=mon, indicator=ind, background=0.,
-                                 coordinate='degree', center=(0., 60.), sf_list=(0.04,),
-                                 tf_list=(1.,2.,4.,8.,15.,), dire_list=rf_direlist, con_list=(0.8,), radius_list=(120.,),
-                                 block_dur=2., midgap_dur=1., iteration=rf_iterationN, pregap_dur=2.,
-                                 postgap_dur=2., is_blank_block=True, is_random_start_phase=False)
-
-ds.set_stim(dgc)
-ds.trigger_display()
-
-
-# ================ full-field static gratings ================ 
-sg_orilist = (0.,30.,60.,90.,120.,150.,)
-sg_sflist = (0.02,0.04,0.08,0.16,0.32,)
-sg_phaselist = (0.,0.25,0.50,0.75)
-sg_iterationN = 50
-# both options last roughly 20-21 minutes
-
-dgc = stim.StaticGratingCircle(monitor=mon, indicator=ind, background=0.,
-                                coordinate='degree', center=(0., 60.), sf_list=sg_sflist,
-                                ori_list=sg_orilist, con_list=(0.8,), radius_list=(120.,), 
-                                display_dur=0.250, midgap_dur=0., iteration=sg_iterationN, pregap_dur=2.,
-                                postgap_dur=2., is_blank_block=True, phase_list = sg_phaselist,)
-
-ds.set_stim(dgc)
-ds.trigger_display()
-
-
-
 
 # ================ other ================ 
 
