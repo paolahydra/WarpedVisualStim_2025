@@ -118,21 +118,20 @@ fl_color = (-0.8, 0.8)
 fl_pregap_dur = 2
 fl_postgap_dur = 2
 fl_midgap_dur = 0.250
-fl_reps = 5
+fl_nreps = 10   
 
 fl = stim.RandomizedUniformFlashes(
     monitor=mon,
     indicator=ind,
     flash_dur=fl_duration,    
     midgap_dur=fl_midgap_dur,    
-    n_reps=fl_reps,            
+    n_reps=fl_nreps,            
     colors=fl_color,   
     pregap_dur=fl_pregap_dur,
     postgap_dur=fl_postgap_dur,
     background=0.0,
     coordinate='degree',
     rng_seed=1234,         # reproducible order
-    balance_colors=True    # enforce ~equal counts, then shuffle
 )
 # ds.set_stim(fl)
 # ds.trigger_display()
@@ -199,27 +198,27 @@ if os.path.isfile(static_images_path):
 si.wrap_images(si_images_folder)
 
 
-# ======================= Stimulus Separator ======================================
-ss_indicator_on_frame_num = 4
-ss_indicator_off_frame_num = 4
-ss_cycle_num = 10
-ss = stim.StimulusSeparator(monitor=mon, indicator=ind, pregap_dur=2.,
-                            postgap_dur=2., coordinate='degree',
-                            background=0.,
-                            indicator_on_frame_num=ss_indicator_on_frame_num,
-                            indicator_off_frame_num=ss_indicator_off_frame_num,
-                            cycle_num=ss_cycle_num)
+# # ======================= Stimulus Separator ======================================
+# ss_indicator_on_frame_num = 4
+# ss_indicator_off_frame_num = 4
+# ss_cycle_num = 10
+# ss = stim.StimulusSeparator(monitor=mon, indicator=ind, pregap_dur=2.,
+#                             postgap_dur=2., coordinate='degree',
+#                             background=0.,
+#                             indicator_on_frame_num=ss_indicator_on_frame_num,
+#                             indicator_off_frame_num=ss_indicator_off_frame_num,
+#                             cycle_num=ss_cycle_num)
 # =================================================================================
 
 # ======================= Combined Stimuli ========================================
-cs_stim_ind_sequence = [0, 1, 2, 3, 4, 5]
+cs_stim_ind_sequence = [0, 1, 2, 3, 4]
 cs = stim.CombinedStimuli(monitor=mon, indicator=ind, pregap_dur=2.,
                           postgap_dur=2., coordinate='degree',
                           background=0.)
 # =================================================================================
 
 # ======================= Set Stimuli Sequence ====================================
-all_stim = [rf, fl, dg, sg, si, ss]
+all_stim = [rf, fl, dg, sg, si]
 stim_seq = [all_stim[stim_ind] for stim_ind in cs_stim_ind_sequence]
 cs.set_stimuli(stimuli=stim_seq, static_images_path=static_images_path)
 # =================================================================================
