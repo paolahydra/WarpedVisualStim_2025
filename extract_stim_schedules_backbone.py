@@ -90,246 +90,204 @@ def ensure_identity_cols(df: pd.DataFrame, stim_key: str, stim_class: str) -> pd
 # ---------- YOUR extractors: plug your working code here ----------
 def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
     """
-    Return a per-trial schedule for DriftingGratingMultipleCircle.
+    Frame-level extractor for DriftingGratingMultipleCircle (DGMC).
 
-    Priorities:
-      1) 'condition_orders_params'  -> list of lists of params (per iteration)
-      2) 'condition_orders_keys' + 'condi_key_to_params' -> map keys to params
-      3) 'all_conditions_shuffled'  -> flat randomized list used in this run
-      4) fallback cartesian grid from parameter lists (not randomized order)
+    Detects ON/OFF transitions from `index_to_display` and `frames_unique`
+    to produce *real* onset_frame/offset_frame aligned with the photodiode.
 
-    Output columns:
-      ['trial','iteration','position','sf','tf','direction','contrast','radius','center', ...globals]
+    Returns one row per presentation with:
+        onset_frame, offset_frame, onset_time_s, offset_time_s,
+        sf, tf, dire, con, radius, center,
+        plus useful global parameters (e.g., block_dur, iteration).
     """
+    import numpy as np
+    import pandas as pd
 
-    # --- helpers ---
-    def _row_from_params(p):
-        """Accepts a dict or a tuple/list (sf, tf, dire, con, radius, center)."""
-        if isinstance(p, dict):
-            # be tolerant to naming minor variants
-            sf   = p.get('sf')
-            tf   = p.get('tf')
-            dire = p.get('dire', p.get('direction'))
-            con  = p.get('con',  p.get('contrast'))
-            rad  = p.get('radius', p.get('rad'))
-            cen  = p.get('center', p.get('centre'))
-        else:
-            # assume ordered tuple/list
-            sf, tf, dire, con, rad, cen = p
-        return {
-            'sf': sf, 'tf': tf, 'direction': dire, 'contrast': con,
-            'radius': rad, 'center': tuple(cen) if isinstance(cen, (list, tuple)) else cen
-        }
+    # ---- monitor refresh rate ----
+    rr = None
+    mon = ctx.get("monitor") if isinstance(ctx, dict) else None
+    if isinstance(mon, dict):
+        for k in ("refresh_rate", "refreshRate", "RefreshRate", "rr", "fps"):
+            if k in mon and mon[k]:
+                rr = float(mon[k]); break
+    if rr is None or rr <= 0:
+        rr = 60.0  # fallback if missing
+    dt = 1.0 / rr
 
-    def _attach_globals(df):
-        """Repeat useful globals per row (safe broadcast)."""
-        if df is None or df.empty:
-            return df
-        globals_like = ['block_dur','pregap_dur','postgap_dur','is_random_start_phase',
-                        'coordinate','background','smooth_width_ratio','is_smooth_edge']
-        for k in globals_like:
-            if k in stim_log and k not in df.columns:
-                val = stim_log[k]
-                df[k] = [tuple(val) if isinstance(val, list) else val] * len(df)
-        return df
+    # ---- extract frames and indices ----
+    frames_unique = stim_log.get("frames_unique")
+    if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 3:
+        raise ValueError("frames_unique missing or malformed")
 
-    # --- 1) condition_orders_params (best) ---
-    if isinstance(stim_log.get('condition_orders_params'), (list, tuple)) and stim_log['condition_orders_params']:
-        rows = []
-        trial = 1
-        for it, conds in enumerate(stim_log['condition_orders_params']):
-            # conds can be list of tuples or dicts
-            for pos, p in enumerate(conds):
-                r = {'trial': trial, 'iteration': it, 'position': pos}
-                r.update(_row_from_params(p))
-                rows.append(r)
-                trial += 1
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    idx = np.asarray(stim_log["index_to_display"], dtype=int)
 
-    # --- 2) condition_orders_keys + condi_key_to_params ---
-    cok = stim_log.get('condition_orders_keys')
-    ck2p = stim_log.get('condi_key_to_params')
-    if isinstance(cok, (list, tuple)) and ck2p and isinstance(ck2p, dict):
-        rows = []
-        trial = 1
-        # keys may be list of lists (per iteration) or a flat list
-        if cok and isinstance(cok[0], (list, tuple)):
-            for it, keys in enumerate(cok):
-                for pos, key in enumerate(keys):
-                    p = ck2p.get(key, {})
-                    r = {'trial': trial, 'iteration': it, 'position': pos, 'cond_key': key}
-                    r.update(_row_from_params(p))
-                    rows.append(r)
-                    trial += 1
-        else:
-            for pos, key in enumerate(cok):
-                p = ck2p.get(key, {})
-                r = {'trial': trial, 'iteration': 0, 'position': pos, 'cond_key': key}
-                r.update(_row_from_params(p))
-                rows.append(r)
-                trial += 1
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    # ---- detect ON/OFF runs ----
+    fu = np.array(frames_unique, dtype=object)
+    is_display = np.array([int(fr[0]) for fr in fu])
+    color_val   = np.array([float(fr[2]) if len(fr) > 2 else np.nan for fr in fu])
 
-    # --- 3) all_conditions_shuffled (flat per-trial randomized list) ---
-    if isinstance(stim_log.get('all_conditions_shuffled'), (list, tuple)) and stim_log['all_conditions_shuffled']:
-        rows = []
-        for pos, p in enumerate(stim_log['all_conditions_shuffled']):
-            r = {'trial': pos+1, 'iteration': 0, 'position': pos}
-            r.update(_row_from_params(p))
-            rows.append(r)
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    color_indices = np.where(is_display == 1)[0]
+    if color_indices.size == 0:
+        raise ValueError("No ON states in frames_unique (is_display==1)")
+    color_map = {int(i): color_val[i] for i in color_indices}
 
-    # --- 4) fallback: rebuild cartesian grid (NOT the realized order) ---
-    # This at least gives you the full set of unique parameter tuples.
-    sf_list     = list(stim_log.get('sf_list', []))
-    tf_list     = list(stim_log.get('tf_list', []))
-    dire_list   = list(stim_log.get('dire_list', []))
-    con_list    = list(stim_log.get('con_list', []))
-    radius_list = list(stim_log.get('radius_list', []))
-    center_list = list(stim_log.get('center_list', []))
-    if all(len(lst) > 0 for lst in (sf_list, tf_list, dire_list, con_list, radius_list, center_list)):
-        rows = []
-        for i, (sf, tf, dire, con, rad, cen) in enumerate(
-            product(sf_list, tf_list, dire_list, con_list, radius_list, center_list), start=1
-        ):
-            rows.append({
-                'trial': i, 'iteration': 0, 'position': i-1,
-                'sf': sf, 'tf': tf, 'direction': dire, 'contrast': con,
-                'radius': rad, 'center': tuple(cen) if isinstance(cen, (list, tuple)) else cen,
-                '_note': 'cartesian_grid_fallback_not_realized_order'
-            })
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    is_on = np.isin(idx, color_indices)
+    onset_mask  = is_on & np.r_[True, idx[1:] != idx[:-1]]
+    offset_mask = is_on & np.r_[idx[:-1] != idx[1:], True]
 
-    # No recognized fields:
-    return pd.DataFrame([{'_extract_error': 'DGMC: no recognizable schedule fields present'}])
+    onset_frames  = np.flatnonzero(onset_mask)
+    offset_frames = np.flatnonzero(offset_mask)
+    onset_idx_vals = idx[onset_frames]
+
+    n = len(onset_frames)
+    if n == 0:
+        raise ValueError("No ON transitions detected")
+
+    # ---- map condition id -> parameters ----
+    # For DGMC: ON frame index = 2*c + 1; condition ID = (idx - 1)//2
+    n_cond = (len(frames_unique) - 1) // 2
+    def cond_params(cid):
+        if 0 <= cid < n_cond:
+            fr = frames_unique[2 * cid + 1]
+            return tuple(fr[1:7])  # (sf, tf, dire, con, radius, center)
+        return (np.nan,)*6
+
+    cond_ids = ((onset_idx_vals - 1) // 2).astype(int)
+
+    # ---- build table ----
+    rows = []
+    for i, (f_on, f_off, cid) in enumerate(zip(onset_frames, offset_frames, cond_ids), start=1):
+        sf, tf, dire, con, rad, cen = cond_params(cid)
+        rows.append({
+            "trial": i,
+            "onset_frame": int(f_on),
+            "offset_frame": int(f_off),
+            "onset_time_s": float(f_on * dt),
+            "offset_time_s": float((f_off + 1) * dt),
+            "sf": sf, "tf": tf, "dire": dire, "con": con, "radius": rad, "center": cen,
+        })
+
+    df = pd.DataFrame(rows)
+
+    # ---- attach useful globals ----
+    globals_like = (
+        "block_dur", "midgap_dur", "iteration", "is_blank_block",
+        "coordinate", "background", "center_list",
+        "is_random_start_phase", "is_smooth_edge", "smooth_width_ratio"
+    )
+    for k in globals_like:
+        if k in stim_log and k not in df.columns:
+            val = stim_log[k]
+            if isinstance(val, list):
+                val = tuple(val)
+            df[k] = [val] * len(df)
+
+    return df
+
 
 
 def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
     """
-    Per-trial schedule for DriftingGratingCircle.
+    Frame-level extractor for DriftingGratingCircle.
 
-    Priority:
-      1) 'condition_orders_params'            -> list[list[params]] (per iteration)
-      2) 'condition_orders_keys' + 'condi_key_to_params'
-      3) 'all_conditions_shuffled'            -> flat randomized list (this run)
-      4) cartesian grid from lists (fallback; NOT realized order)
+    Detects ON/OFF transitions from `index_to_display` and `frames_unique`
+    to produce true onset_frame/offset_frame aligned with photodiode.
 
-    Output columns:
-      ['trial','iteration','position','sf','tf','direction','contrast','radius', ...globals]
+    Returns one row per presentation:
+        onset_frame, offset_frame, onset_time_s, offset_time_s,
+        sf, tf, dire, con, radius, plus useful globals.
     """
+    import numpy as np
+    import pandas as pd
 
-    # --- helpers ---
-    def _row_from_params(p):
-        """Accept a dict or tuple/list (sf, tf, dire, con, radius)."""
-        if isinstance(p, dict):
-            sf   = p.get('sf')
-            tf   = p.get('tf')
-            dire = p.get('dire', p.get('direction'))
-            con  = p.get('con',  p.get('contrast'))
-            rad  = p.get('radius', p.get('rad'))
-        else:
-            sf, tf, dire, con, rad = p
-        return {'sf': sf, 'tf': tf, 'direction': dire, 'contrast': con, 'radius': rad}
+    # ---- monitor refresh rate ----
+    rr = None
+    mon = ctx.get("monitor") if isinstance(ctx, dict) else None
+    if isinstance(mon, dict):
+        for k in ("refresh_rate", "refreshRate", "RefreshRate", "rr", "fps"):
+            if k in mon and mon[k]:
+                rr = float(mon[k]); break
+    if rr is None or rr <= 0:
+        rr = 60.0  # fallback
+    dt = 1.0 / rr
 
-    def _attach_globals(df):
-        if df is None or df.empty:
-            return df
-        # Repeat useful globals per row
-        globals_like = [
-            'block_dur','pregap_dur','postgap_dur','is_random_start_phase',
-            'coordinate','background','smooth_width_ratio','is_smooth_edge','center'
-        ]
-        for k in globals_like:
-            if k in stim_log and k not in df.columns:
-                val = stim_log[k]
-                if isinstance(val, list):
-                    val = tuple(val)
-                df[k] = [val] * len(df)
-        return df
+    # ---- extract relevant arrays ----
+    frames_unique = stim_log.get("frames_unique")
+    if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 3:
+        raise ValueError("frames_unique missing or malformed")
 
-    # --- 1) condition_orders_params (best) ---
-    cop = stim_log.get('condition_orders_params')
-    if isinstance(cop, (list, tuple)) and cop:
-        rows, trial = [], 1
-        for it, conds in enumerate(cop):
-            for pos, p in enumerate(conds):
-                r = {'trial': trial, 'iteration': it, 'position': pos}
-                r.update(_row_from_params(p))
-                rows.append(r)
-                trial += 1
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    idx = np.asarray(stim_log["index_to_display"], dtype=int)
 
-    # --- 2) condition_orders_keys + mapping ---
-    cok  = stim_log.get('condition_orders_keys')
-    ck2p = stim_log.get('condi_key_to_params')
-    if isinstance(cok, (list, tuple)) and ck2p and isinstance(ck2p, dict):
-        rows, trial = [], 1
-        if cok and isinstance(cok[0], (list, tuple)):
-            for it, keys in enumerate(cok):
-                for pos, key in enumerate(keys):
-                    p = ck2p.get(key, {})
-                    r = {'trial': trial, 'iteration': it, 'position': pos, 'cond_key': key}
-                    r.update(_row_from_params(p))
-                    rows.append(r); trial += 1
-        else:
-            for pos, key in enumerate(cok):
-                p = ck2p.get(key, {})
-                r = {'trial': trial, 'iteration': 0, 'position': pos, 'cond_key': key}
-                r.update(_row_from_params(p))
-                rows.append(r); trial += 1
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    # ---- detect ON/OFF runs ----
+    fu = np.array(frames_unique, dtype=object)
+    is_display = np.array([int(fr[0]) for fr in fu])
+    color_val   = np.array([float(fr[2]) if len(fr) > 2 else np.nan for fr in fu])
 
-    # --- 3) all_conditions_shuffled (flat randomized list) ---
-    acs = stim_log.get('all_conditions_shuffled')
-    if isinstance(acs, (list, tuple)) and acs:
-        rows = []
-        for pos, p in enumerate(acs):
-            r = {'trial': pos+1, 'iteration': 0, 'position': pos}
-            r.update(_row_from_params(p))
-            rows.append(r)
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    color_indices = np.where(is_display == 1)[0]
+    color_map = {int(i): color_val[i] for i in color_indices}
 
-    # --- 4) cartesian grid fallback (NOT realized order) ---
-    sf_list     = list(stim_log.get('sf_list', []))
-    tf_list     = list(stim_log.get('tf_list', []))
-    dire_list   = list(stim_log.get('dire_list', []))
-    con_list    = list(stim_log.get('con_list', []))
-    radius_list = list(stim_log.get('radius_list', []))
-    if all(len(lst) > 0 for lst in (sf_list, tf_list, dire_list, con_list, radius_list)):
-        rows = []
-        for i, (sf, tf, dire, con, rad) in enumerate(
-            product(sf_list, tf_list, dire_list, con_list, radius_list), start=1
-        ):
-            rows.append({
-                'trial': i, 'iteration': 0, 'position': i-1,
-                'sf': sf, 'tf': tf, 'direction': dire, 'contrast': con, 'radius': rad,
-                '_note': 'cartesian_grid_fallback_not_realized_order'
-            })
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    is_on = np.isin(idx, color_indices)
+    onset_mask  = is_on & np.r_[True, idx[1:] != idx[:-1]]
+    offset_mask = is_on & np.r_[idx[:-1] != idx[1:], True]
 
-    # No recognizable schedule fields
-    return pd.DataFrame([{'_extract_error': 'DGC: no recognizable schedule fields present'}])
+    onset_frames  = np.flatnonzero(onset_mask)
+    offset_frames = np.flatnonzero(offset_mask)
+    onset_idx_vals = idx[onset_frames]
+    offset_idx_vals = idx[offset_frames]
+
+    n = len(onset_frames)
+    if n == 0:
+        raise ValueError("No ON transitions detected")
+
+    # ---- map condition id -> parameters ----
+    # For drifting gratings: ON index = 2*c + 1, condition id = (index - 1)//2
+    n_cond = (len(frames_unique) - 1) // 2
+    def cond_params(cid):
+        if 0 <= cid < n_cond:
+            fr = frames_unique[2 * cid + 1]
+            return tuple(fr[1:6])  # (sf, tf, dire, con, radius)
+        return (np.nan,)*5
+
+    cond_ids = ((onset_idx_vals - 1) // 2).astype(int)
+
+    # ---- build table ----
+    rows = []
+    for i, (f_on, f_off, cid) in enumerate(zip(onset_frames, offset_frames, cond_ids), start=1):
+        sf, tf, dire, con, rad = cond_params(cid)
+        rows.append({
+            "trial": i,
+            "onset_frame": int(f_on),
+            "offset_frame": int(f_off),
+            "onset_time_s": float(f_on * dt),
+            "offset_time_s": float((f_off + 1) * dt),
+            "sf": sf, "tf": tf, "dire": dire, "con": con, "radius": rad,
+        })
+
+    df = pd.DataFrame(rows)
+
+    # ---- attach useful globals ----
+    for k in ("block_dur", "midgap_dur", "iteration", "is_blank_block",
+              "coordinate", "background", "center", "is_random_start_phase"):
+        if k in stim_log and k not in df.columns:
+            val = stim_log[k]
+            if isinstance(val, list):
+                val = tuple(val)
+            df[k] = [val] * len(df)
+
+    return df
+
 
 
 def extract_StaticGratingCircle(stim_key, stim_log, ctx):
     """
-    Build a per-presentation table for StaticGratingCircle by detecting ON-frame onsets.
-    Robust to:
-      - frames list name: 'frames_unique_compact' or '_frames_unique_compact'
-      - index sequence:    'index_to_display' or 'frame_config'
-    Requires monitor refresh rate from ctx['monitor']['refresh_rate'].
-    Output columns: onset_frame, onset_time_s, sf, ph, ori, con, radius
+    StaticGratingCircle with true onset/offset:
+    - Detect ON/OFF runs from index_to_display (or frame_config) and frames_unique(_compact).
+    - Return one row per ON presentation with onset/offset frame/time and (sf, ph, ori, con, radius).
     """
+    import numpy as np
+    import pandas as pd
 
-    # ---- resolve frames_unique_compact ----
+    # ---- resolve frames_unique_compact / _frames_unique_compact ----
     frames_unique = None
     for key in ("frames_unique_compact", "_frames_unique_compact"):
         if key in stim_log and isinstance(stim_log[key], (list, tuple)):
@@ -338,11 +296,10 @@ def extract_StaticGratingCircle(stim_key, stim_log, ctx):
     if frames_unique is None:
         return pd.DataFrame([{"_extract_error": "SGC: missing frames_unique_compact/_frames_unique_compact"}])
 
-    # ---- resolve index_to_display (frame indices over time) ----
+    # ---- resolve index_to_display / frame_config (ints or dicts with frame_idx) ----
     if "index_to_display" in stim_log:
         idx = np.asarray(stim_log["index_to_display"], dtype=int)
     elif "frame_config" in stim_log:
-        # frame_config can be a list of ints or list of dicts with 'frame_idx'
         fc = stim_log["frame_config"]
         if len(fc) > 0 and isinstance(fc[0], dict) and "frame_idx" in fc[0]:
             idx = np.asarray([int(d["frame_idx"]) for d in fc], dtype=int)
@@ -352,56 +309,65 @@ def extract_StaticGratingCircle(stim_key, stim_log, ctx):
         return pd.DataFrame([{"_extract_error": "SGC: missing index_to_display/frame_config"}])
 
     # ---- monitor refresh rate ----
-    fr = None
-    try:
-        mon = ctx.get("monitor") if isinstance(ctx, dict) else None
-        if mon and "refresh_rate" in mon:
-            fr = float(mon["refresh_rate"])
-    except Exception:
-        pass
-    if not fr or fr <= 0:
+    rr = None
+    mon = ctx.get("monitor") if isinstance(ctx, dict) else None
+    if isinstance(mon, dict):
+        for k in ("refresh_rate","refreshRate","RefreshRate","rr","fps"):
+            if k in mon and mon[k]:
+                rr = float(mon[k]); break
+    if not rr or rr <= 0:
         return pd.DataFrame([{"_extract_error": "SGC: missing/invalid monitor.refresh_rate"}])
+    dt = 1.0 / rr
 
-    # ---- helper: map condition id -> (sf, ph, ori, con, radius) ----
-    # frames_unique is typically: index 0 = GAP; then alternating ON/OFF pairs:
-    # ON index = 2*c + 1, OFF index = 2*c + 2  (so cond_id = (idx-1)//2)
+    # ---- ON/OFF detection ----
+    # Convention: frames_unique[0] = GAP; for condition c: ON = 2*c+1, OFF = 2*c+2
     n_cond = (len(frames_unique) - 1) // 2
-    def cond_params(cid):
-        # frames_unique[2*cid + 1] is the ON frame; element [1:6] holds (sf, ph, ori, con, radius)
-        fr_tuple = frames_unique[2 * cid + 1]
-        # tolerate either tuple/list with leading flag; keep [1:6]
-        return tuple(fr_tuple[1:6])
 
-    # ---- detect ON onsets ----
+    def cond_params(cid):
+        # ON frame payload has (flag, sf, ph, ori, con, radius, ...)
+        fr_tuple = frames_unique[2 * cid + 1]
+        return tuple(fr_tuple[1:6])  # (sf, ph, ori, con, radius)
+
     is_gap = (idx == 0)
     is_on  = (~is_gap) & (idx % 2 == 1)
-    onset_mask = is_on & np.r_[True, idx[1:] != idx[:-1]]  # first ON frame or change of ON index
-    onset_frames = np.flatnonzero(onset_mask)
+
+    # onsets: first ON of a run; offsets: last ON of a run
+    onset_mask  = is_on & np.r_[True, idx[1:] != idx[:-1]]
+    offset_mask = is_on & np.r_[idx[:-1] != idx[1:], True]
+
+    onset_frames  = np.flatnonzero(onset_mask)
+    offset_frames = np.flatnonzero(offset_mask)
     if onset_frames.size == 0:
         return pd.DataFrame([{"_extract_error": "SGC: no ON onsets detected"}])
 
-    # condition id for each onset
+    # map ON frame index -> condition id
     cond_ids = ((idx[onset_frames] - 1) // 2).astype(int)
-    # safety clamp
     cond_ids = np.clip(cond_ids, 0, max(n_cond - 1, 0))
 
     # ---- assemble rows ----
     rows = []
-    for f, cid in zip(onset_frames, cond_ids):
+    for i, (f_on, f_off, cid) in enumerate(zip(onset_frames, offset_frames, cond_ids), start=1):
         try:
             sf, ph, ori, con, rad = cond_params(int(cid))
         except Exception:
-            rows.append({"_extract_error": f"SGC: bad cond id {int(cid)}", "onset_frame": int(f)})
+            rows.append({"_extract_error": f"SGC: bad cond id {int(cid)}",
+                         "trial": i, "onset_frame": int(f_on), "offset_frame": int(f_off)})
             continue
         rows.append({
-            "onset_frame": int(f),
-            "onset_time_s": float(f / fr),
-            "sf": sf, "ph": ph, "ori": ori, "con": con, "radius": rad
+            "trial": i,
+            "onset_frame": int(f_on),
+            "offset_frame": int(f_off),
+            "onset_time_s": float(f_on * dt),
+            # offset_time_s is the boundary after the last included ON frame
+            "offset_time_s": float((f_off + 1) * dt),
+            "sf": sf, "ph": ph, "ori": ori, "con": con, "radius": rad,
+            "measured_frames": int(f_off - f_on + 1),
+            "measured_dur_s": float((f_off - f_on + 1) * dt),
         })
 
     df = pd.DataFrame(rows)
 
-    # ---- optional: attach useful globals repeated per row ----
+    # ---- optional: attach useful globals per row ----
     globals_like = ("display_dur", "midgap_dur", "iteration", "is_blank_block",
                     "coordinate", "background", "center")
     for k in globals_like:
@@ -412,6 +378,7 @@ def extract_StaticGratingCircle(stim_key, stim_log, ctx):
             df[k] = [val] * len(df)
 
     return df
+
 
 
 def extract_RandomizedUniformFlashes(stim_key, stim_log, ctx):
