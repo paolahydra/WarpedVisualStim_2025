@@ -4,6 +4,8 @@
 
 #*.iml
 *.pyc
+*.tif
+*.tiff
 
 
 ## Directory-based project format:
