@@ -90,74 +90,86 @@ def ensure_identity_cols(df: pd.DataFrame, stim_key: str, stim_class: str) -> pd
 # ---------- YOUR extractors: plug your working code here ----------
 def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
     """
-    Frame-level extractor for DriftingGratingMultipleCircle (DGMC).
-
-    Detects ON/OFF transitions from `index_to_display` and `frames_unique`
-    to produce *real* onset_frame/offset_frame aligned with the photodiode.
-
-    Returns one row per presentation with:
-        onset_frame, offset_frame, onset_time_s, offset_time_s,
-        sf, tf, dire, con, radius, center,
-        plus useful global parameters (e.g., block_dur, iteration).
+    Frame-level extractor for DGMC with real onset/offset frames.
     """
     import numpy as np
     import pandas as pd
 
-    # ---- monitor refresh rate ----
+    # ---- refresh rate ----
     rr = None
     mon = ctx.get("monitor") if isinstance(ctx, dict) else None
     if isinstance(mon, dict):
-        for k in ("refresh_rate", "refreshRate", "RefreshRate", "rr", "fps"):
+        for k in ("refresh_rate","refreshRate","RefreshRate","rr","fps"):
             if k in mon and mon[k]:
                 rr = float(mon[k]); break
     if rr is None or rr <= 0:
-        rr = 60.0  # fallback if missing
+        rr = 60.0
     dt = 1.0 / rr
 
-    # ---- extract frames and indices ----
+    # ---- inputs ----
     frames_unique = stim_log.get("frames_unique")
     if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 3:
         raise ValueError("frames_unique missing or malformed")
-
     idx = np.asarray(stim_log["index_to_display"], dtype=int)
 
-    # ---- detect ON/OFF runs ----
     fu = np.array(frames_unique, dtype=object)
-    is_display = np.array([int(fr[0]) for fr in fu])
-    color_val   = np.array([float(fr[2]) if len(fr) > 2 else np.nan for fr in fu])
 
-    color_indices = np.where(is_display == 1)[0]
-    if color_indices.size == 0:
+    def _is_disp(fr):
+        try:
+            x = fr[0]
+            return int(x) if x is not None else 0
+        except Exception:
+            return 0
+
+    is_display = np.array([_is_disp(fr) for fr in fu], dtype=int)
+    on_indices = np.where(is_display == 1)[0]
+    if on_indices.size == 0:
         raise ValueError("No ON states in frames_unique (is_display==1)")
-    color_map = {int(i): color_val[i] for i in color_indices}
 
-    is_on = np.isin(idx, color_indices)
+    # ON/OFF runs
+    is_on = np.isin(idx, on_indices)
     onset_mask  = is_on & np.r_[True, idx[1:] != idx[:-1]]
     offset_mask = is_on & np.r_[idx[:-1] != idx[1:], True]
-
     onset_frames  = np.flatnonzero(onset_mask)
     offset_frames = np.flatnonzero(offset_mask)
+    if onset_frames.size == 0:
+        raise ValueError("No ON transitions detected")
     onset_idx_vals = idx[onset_frames]
 
-    n = len(onset_frames)
-    if n == 0:
-        raise ValueError("No ON transitions detected")
-
-    # ---- map condition id -> parameters ----
-    # For DGMC: ON frame index = 2*c + 1; condition ID = (idx - 1)//2
+    # Condition id mapping
     n_cond = (len(frames_unique) - 1) // 2
-    def cond_params(cid):
-        if 0 <= cid < n_cond:
-            fr = frames_unique[2 * cid + 1]
-            return tuple(fr[1:7])  # (sf, tf, dire, con, radius, center)
-        return (np.nan,)*6
+
+    def _params_from_on_frame(fr):
+        """
+        Extract (sf, tf, dire, con, radius, center) from ON-frame entry.
+        """
+        if isinstance(fr, dict):
+            sf   = fr.get("sf")
+            tf   = fr.get("tf")
+            dire = fr.get("dire", fr.get("direction"))
+            con  = fr.get("con",  fr.get("contrast"))
+            rad  = fr.get("radius")
+            cen  = fr.get("center", fr.get("centre"))
+            if isinstance(cen, list):
+                cen = tuple(cen)
+            return sf, tf, dire, con, rad, cen
+        if isinstance(fr, (list, tuple)):
+            # Common layout: [flag, sf, tf, dire, con, radius, center, ...]
+            if len(fr) >= 7:
+                cen = fr[6]
+                if isinstance(cen, list):
+                    cen = tuple(cen)
+                return fr[1], fr[2], fr[3], fr[4], fr[5], cen
+        return (np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
 
     cond_ids = ((onset_idx_vals - 1) // 2).astype(int)
-
-    # ---- build table ----
     rows = []
     for i, (f_on, f_off, cid) in enumerate(zip(onset_frames, offset_frames, cond_ids), start=1):
-        sf, tf, dire, con, rad, cen = cond_params(cid)
+        if 0 <= cid < n_cond:
+            on_fr = frames_unique[2 * cid + 1]
+        else:
+            on_fr = None
+        sf, tf, dire, con, rad, cen = _params_from_on_frame(on_fr) if on_fr is not None else (np.nan,)*6
         rows.append({
             "trial": i,
             "onset_frame": int(f_on),
@@ -169,91 +181,100 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
 
     df = pd.DataFrame(rows)
 
-    # ---- attach useful globals ----
-    globals_like = (
-        "block_dur", "midgap_dur", "iteration", "is_blank_block",
-        "coordinate", "background", "center_list",
-        "is_random_start_phase", "is_smooth_edge", "smooth_width_ratio"
-    )
-    for k in globals_like:
+    # Attach globals per row
+    for k in ("block_dur","midgap_dur","iteration","is_blank_block",
+              "coordinate","background","center_list",
+              "is_random_start_phase","is_smooth_edge","smooth_width_ratio"):
         if k in stim_log and k not in df.columns:
-            val = stim_log[k]
-            if isinstance(val, list):
-                val = tuple(val)
-            df[k] = [val] * len(df)
+            v = stim_log[k]
+            if isinstance(v, list):
+                v = tuple(v)
+            df[k] = [v] * len(df)
 
     return df
 
 
 
+
 def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
     """
-    Frame-level extractor for DriftingGratingCircle.
-
-    Detects ON/OFF transitions from `index_to_display` and `frames_unique`
-    to produce true onset_frame/offset_frame aligned with photodiode.
-
-    Returns one row per presentation:
-        onset_frame, offset_frame, onset_time_s, offset_time_s,
-        sf, tf, dire, con, radius, plus useful globals.
+    Frame-level extractor for DriftingGratingCircle with real onset/offset frames.
     """
     import numpy as np
     import pandas as pd
 
-    # ---- monitor refresh rate ----
+    # ---- refresh rate ----
     rr = None
     mon = ctx.get("monitor") if isinstance(ctx, dict) else None
     if isinstance(mon, dict):
-        for k in ("refresh_rate", "refreshRate", "RefreshRate", "rr", "fps"):
+        for k in ("refresh_rate","refreshRate","RefreshRate","rr","fps"):
             if k in mon and mon[k]:
                 rr = float(mon[k]); break
     if rr is None or rr <= 0:
-        rr = 60.0  # fallback
+        rr = 60.0
     dt = 1.0 / rr
 
-    # ---- extract relevant arrays ----
+    # ---- inputs ----
     frames_unique = stim_log.get("frames_unique")
     if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 3:
         raise ValueError("frames_unique missing or malformed")
-
     idx = np.asarray(stim_log["index_to_display"], dtype=int)
 
-    # ---- detect ON/OFF runs ----
     fu = np.array(frames_unique, dtype=object)
-    is_display = np.array([int(fr[0]) for fr in fu])
-    color_val   = np.array([float(fr[2]) if len(fr) > 2 else np.nan for fr in fu])
 
-    color_indices = np.where(is_display == 1)[0]
-    color_map = {int(i): color_val[i] for i in color_indices}
+    # Robust is_display extraction (treat None as 0)
+    def _is_disp(fr):
+        try:
+            x = fr[0]
+            return int(x) if x is not None else 0
+        except Exception:
+            return 0
 
-    is_on = np.isin(idx, color_indices)
+    is_display = np.array([_is_disp(fr) for fr in fu], dtype=int)
+    on_indices = np.where(is_display == 1)[0]
+    if on_indices.size == 0:
+        raise ValueError("No ON states in frames_unique (is_display==1)")
+
+    # ON/OFF runs
+    is_on = np.isin(idx, on_indices)
     onset_mask  = is_on & np.r_[True, idx[1:] != idx[:-1]]
     offset_mask = is_on & np.r_[idx[:-1] != idx[1:], True]
-
     onset_frames  = np.flatnonzero(onset_mask)
     offset_frames = np.flatnonzero(offset_mask)
-    onset_idx_vals = idx[onset_frames]
-    offset_idx_vals = idx[offset_frames]
-
-    n = len(onset_frames)
-    if n == 0:
+    if onset_frames.size == 0:
         raise ValueError("No ON transitions detected")
+    onset_idx_vals = idx[onset_frames]
 
-    # ---- map condition id -> parameters ----
-    # For drifting gratings: ON index = 2*c + 1, condition id = (index - 1)//2
+    # Condition id from ON index: ON=2*c+1 → c=(i-1)//2
     n_cond = (len(frames_unique) - 1) // 2
-    def cond_params(cid):
-        if 0 <= cid < n_cond:
-            fr = frames_unique[2 * cid + 1]
-            return tuple(fr[1:6])  # (sf, tf, dire, con, radius)
-        return (np.nan,)*5
+
+    def _params_from_on_frame(fr):
+        """
+        Accepts the ON-frame entry and extracts (sf, tf, dire, con, radius).
+        Works for list/tuple or dict payloads.
+        """
+        if isinstance(fr, dict):
+            sf   = fr.get("sf")
+            tf   = fr.get("tf")
+            dire = fr.get("dire", fr.get("direction"))
+            con  = fr.get("con",  fr.get("contrast"))
+            rad  = fr.get("radius")
+            return sf, tf, dire, con, rad
+        if isinstance(fr, (list, tuple)):
+            # Common layout: [flag, sf, tf, dire, con, radius, ...]
+            if len(fr) >= 6:
+                return fr[1], fr[2], fr[3], fr[4], fr[5]
+        # Fallback: fill NaNs
+        return (np.nan, np.nan, np.nan, np.nan, np.nan)
 
     cond_ids = ((onset_idx_vals - 1) // 2).astype(int)
-
-    # ---- build table ----
     rows = []
     for i, (f_on, f_off, cid) in enumerate(zip(onset_frames, offset_frames, cond_ids), start=1):
-        sf, tf, dire, con, rad = cond_params(cid)
+        if 0 <= cid < n_cond:
+            on_fr = frames_unique[2 * cid + 1]
+        else:
+            on_fr = None
+        sf, tf, dire, con, rad = _params_from_on_frame(on_fr) if on_fr is not None else (np.nan,)*5
         rows.append({
             "trial": i,
             "onset_frame": int(f_on),
@@ -265,16 +286,18 @@ def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
 
     df = pd.DataFrame(rows)
 
-    # ---- attach useful globals ----
-    for k in ("block_dur", "midgap_dur", "iteration", "is_blank_block",
-              "coordinate", "background", "center", "is_random_start_phase"):
+    # Attach useful globals per row
+    for k in ("block_dur","midgap_dur","iteration","is_blank_block",
+              "coordinate","background","center","is_random_start_phase",
+              "is_smooth_edge","smooth_width_ratio"):
         if k in stim_log and k not in df.columns:
-            val = stim_log[k]
-            if isinstance(val, list):
-                val = tuple(val)
-            df[k] = [val] * len(df)
+            v = stim_log[k]
+            if isinstance(v, list):
+                v = tuple(v)
+            df[k] = [v] * len(df)
 
     return df
+
 
 
 
