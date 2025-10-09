@@ -614,220 +614,148 @@ def extract_RandomizedUniformFlashes(stim_key, stim_log, ctx):
 
 def extract_StaticImages(stim_key, stim_log, ctx):
     """
-    Per-presentation table for StaticImages.
+    Extract full randomized StaticImages display schedule from a stim_log dict.
 
-    Priority:
-      1) presentations
-      2) condition_orders_params
-      3) condition_orders_keys + condi_key_to_params
-      4) all_conditions_shuffled
-      5) frames_unique_compact/_frames_unique_compact + index_to_display/frame_config (ON onsets)
+    Robust to slightly different key layouts (frames_unique/_compact, index_to_display/index).
+    Returns a DataFrame (one row per displayed image) with:
+        presentation_idx, iteration, within_iteration_idx, unique_index, image_index,
+        start_frame, end_frame, onset_s, offset_s, duration_s, n_frames,
+        plus useful global metadata repeated per row.
 
-    Output columns (best-effort): trial, iteration, position, image_id, image_path, label, category,
-                                  onset_frame, onset_time_s, plus selected globals.
+    No file I/O — suitable for use in backbone pipeline.
     """
     import numpy as np
     import pandas as pd
 
-    # ---- helpers ----
-    def _take(d, *keys):
-        """Return first present key from dict d."""
-        for k in keys:
-            if isinstance(d, dict) and k in d:
-                return d[k]
-        return None
+    # ---------- helper functions ----------
+    def _get_refresh_rate(ctx_or_stim):
+        """Get refresh rate from ctx['monitor'] or stim_log['monitor']."""
+        mon = None
+        if isinstance(ctx_or_stim, dict):
+            if "monitor" in ctx_or_stim and isinstance(ctx_or_stim["monitor"], dict):
+                mon = ctx_or_stim["monitor"]
+            elif "refresh_rate" in ctx_or_stim:  # direct call on stim_log
+                mon = ctx_or_stim
+        if mon is None and isinstance(ctx, dict) and "monitor" in ctx:
+            mon = ctx["monitor"]
+        if not isinstance(mon, dict):
+            raise KeyError("monitor info not found in ctx or stim_log")
 
-    def _norm_image_row(p):
-        """
-        Accept dict or tuple/list; extract common image fields.
-        Returns a dict with any of: image_id, image_path, label, category.
-        """
-        row = {}
-        if isinstance(p, dict):
-            for k in ("image_id", "img_id", "id"):
-                v = p.get(k)
-                if v is not None:
-                    row["image_id"] = v
-                    break
-            for k in ("image_path", "path", "file", "filename", "filepath"):
-                v = p.get(k)
-                if v is not None:
-                    row["image_path"] = v
-                    break
-            for k in ("label", "name", "title"):
-                v = p.get(k)
-                if v is not None:
-                    row["label"] = v
-                    break
-            for k in ("category", "class"):
-                v = p.get(k)
-                if v is not None:
-                    row["category"] = v
-                    break
-            # If nothing explicit, try a generic 'image'/'stim' field
-            if not row.get("image_path") and not row.get("image_id"):
-                v = _take(p, "image", "stim", "item")
-                if isinstance(v, str):
-                    row["image_path"] = v
-        else:
-            # tuple/list fallback: assume first string-looking element is path/id
-            if isinstance(p, (list, tuple)):
-                for el in p:
-                    if isinstance(el, str):
-                        # crude heuristic: path if contains a separator or dot, else id
-                        if ("/" in el or "\\" in el or "." in el) and "image_path" not in row:
-                            row["image_path"] = el
-                        elif "image_id" not in row:
-                            row["image_id"] = el
-        return row
+        for k in ("refresh_rate","refreshRate","RefreshRate","rr","fps"):
+            if k in mon and mon[k]:
+                return float(mon[k])
+        raise KeyError("monitor.refresh_rate not found")
 
-    def _attach_globals(df):
-        if df is None or df.empty:
-            return df
-        globals_like = ("display_dur", "midgap_dur", "iteration", "is_blank_block",
-                        "coordinate", "background", "center")
-        for k in globals_like:
-            if k in stim_log and k not in df.columns:
-                val = stim_log[k]
-                if isinstance(val, list):
-                    val = tuple(val)
-                df[k] = [val] * len(df)
-        return df
-
-    # ---- 1) presentations ----
-    pres = stim_log.get("presentations")
-    if isinstance(pres, (list, tuple)) and pres:
-        rows = []
-        for i, p in enumerate(pres, start=1):
-            r = {"trial": i, "iteration": 0, "position": i-1}
-            if isinstance(p, dict):
-                r.update(_norm_image_row(p))
-                # carry timing if present
-                for tk in ("t_start", "t_stop", "t_on", "t_off", "start_time", "stop_time", "onset_frame", "onset_time_s"):
-                    if tk in p:
-                        r[tk] = p[tk]
+    def _normalize_frames_unique(frames_unique):
+        """Ensure each row is (is_display:int, image_index:int|None, indicator_val:float)."""
+        fu = []
+        for fr in frames_unique:
+            if isinstance(fr, (list, tuple)) and len(fr) >= 3:
+                is_disp = int(fr[0])
+                img_idx = None if fr[1] is None else int(fr[1])
+                ind_val = float(fr[2])
             else:
-                r.update(_norm_image_row(p))
-            rows.append(r)
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+                fr = list(fr)
+                is_disp = int(fr[0])
+                img_idx = None if fr[1] is None else int(fr[1])
+                ind_val = float(fr[2])
+            fu.append((is_disp, img_idx, ind_val))
+        return fu
 
-    # ---- 2) condition_orders_params ----
-    cop = stim_log.get("condition_orders_params")
-    if isinstance(cop, (list, tuple)) and cop:
-        rows = []
-        trial = 1
-        for it, conds in enumerate(cop):
-            for pos, p in enumerate(conds):
-                r = {"trial": trial, "iteration": it, "position": pos}
-                r.update(_norm_image_row(p))
-                rows.append(r); trial += 1
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    # ---------- get data ----------
+    rr = _get_refresh_rate(ctx)
+    dt = 1.0 / rr
 
-    # ---- 3) condition_orders_keys + mapping ----
-    cok  = stim_log.get("condition_orders_keys")
-    ck2p = stim_log.get("condi_key_to_params")
-    if isinstance(cok, (list, tuple)) and ck2p and isinstance(ck2p, dict):
-        rows = []
-        trial = 1
-        if cok and isinstance(cok[0], (list, tuple)):
-            for it, keys in enumerate(cok):
-                for pos, key in enumerate(keys):
-                    p = ck2p.get(key, {})
-                    r = {"trial": trial, "iteration": it, "position": pos, "cond_key": key}
-                    r.update(_norm_image_row(p))
-                    rows.append(r); trial += 1
-        else:
-            for pos, key in enumerate(cok):
-                p = ck2p.get(key, {})
-                r = {"trial": trial, "iteration": 0, "position": pos, "cond_key": key}
-                r.update(_norm_image_row(p))
-                rows.append(r); trial += 1
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    frames_unique = (
+        stim_log.get("frames_unique")
+        or stim_log.get("_frames_unique_compact")
+        or stim_log.get("frames")
+    )
+    index_to_display = (
+        stim_log.get("index_to_display")
+        or stim_log.get("frame_config")
+        or stim_log.get("index")
+    )
+    if frames_unique is None or index_to_display is None:
+        raise KeyError(
+            f"Missing frames_unique/index_to_display in stim_log. Keys: {list(stim_log.keys())}"
+        )
 
-    # ---- 4) all_conditions_shuffled ----
-    acs = stim_log.get("all_conditions_shuffled")
-    if isinstance(acs, (list, tuple)) and acs:
-        rows = []
-        for pos, p in enumerate(acs):
-            r = {"trial": pos+1, "iteration": 0, "position": pos}
-            r.update(_norm_image_row(p))
-            rows.append(r)
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    fu = _normalize_frames_unique(frames_unique)
+    idx = np.asarray(index_to_display, dtype=int)
+    n_total = idx.size
 
-    # ---- 5) frames_unique_compact route (detect ON onsets) ----
-    frames_unique = None
-    for key in ("frames_unique_compact", "_frames_unique_compact"):
-        if key in stim_log and isinstance(stim_log[key], (list, tuple)):
-            frames_unique = stim_log[key]; break
+    # ---------- compress consecutive identical frame indices ----------
+    runs = []
+    if n_total > 0:
+        start = 0
+        cur = idx[0]
+        for i in range(1, n_total):
+            if idx[i] != cur:
+                runs.append((int(cur), start, i - 1))
+                start = i
+                cur = idx[i]
+        runs.append((int(cur), start, n_total - 1))
 
-    # index/time base
-    idx = None
-    if "index_to_display" in stim_log:
-        idx = np.asarray(stim_log["index_to_display"], dtype=int)
-    elif "frame_config" in stim_log:
-        fc = stim_log["frame_config"]
-        if len(fc) > 0 and isinstance(fc[0], dict) and "frame_idx" in fc[0]:
-            idx = np.asarray([int(d["frame_idx"]) for d in fc], dtype=int)
-        else:
-            idx = np.asarray(fc, dtype=int)
+    rows = []
+    for run_id, (uix, s, e) in enumerate(runs, start=1):
+        if not (0 <= uix < len(fu)):
+            raise IndexError(f"index_to_display refers to unknown frames_unique index {uix}")
+        is_display, img_index, ind_val = fu[uix]
+        nfrm = (e - s + 1)
+        kind = "gap"
+        if is_display == 1 and (img_index is None or img_index < 0):
+            kind = "blank"
+        elif is_display == 1 and (img_index is not None and img_index >= 0):
+            kind = "display"
+        rows.append({
+            "run_idx": run_id,
+            "kind": kind,
+            "unique_index": uix,
+            "image_index": ("" if img_index is None else img_index),
+            "start_frame": s,
+            "end_frame": e,
+            "n_frames": nfrm,
+            "onset_s": s * dt,
+            "offset_s": (e + 1) * dt,   # inclusive end frame -> add 1
+            "duration_s": nfrm * dt,
+        })
 
-    # monitor refresh
-    fr = None
-    try:
-        mon = ctx.get("monitor") if isinstance(ctx, dict) else None
-        if mon and "refresh_rate" in mon:
-            fr = float(mon["refresh_rate"])
-    except Exception:
-        pass
+    df_all = pd.DataFrame(rows)
 
-    if frames_unique is not None and idx is not None and fr and fr > 0:
-        # 0 = GAP; for c in [0..n_cond-1]: ON = 2*c+1, OFF = 2*c+2
-        is_gap = (idx == 0)
-        is_on  = (~is_gap) & (idx % 2 == 1)
-        onset_mask = is_on & np.r_[True, idx[1:] != idx[:-1]]
-        onset_frames = np.flatnonzero(onset_mask)
+    # ---------- select only randomized display runs ----------
+    df_disp = df_all[df_all["kind"] == "display"].copy().reset_index(drop=True)
+    df_disp.insert(0, "presentation_idx", np.arange(1, len(df_disp) + 1))
 
-        def _cond_params_from_frames_unique(fr_u):
-            n_cond = (len(fr_u) - 1) // 2
-            # For images, the ON frame payload (fr_u[2*c+1]) may contain various things; try common fields/slots.
-            def _img_from_on_frame(onf):
-                # onf could be a tuple/list like (flag, image_id/path/obj, ...)
-                # Heuristic: if dict at [1], use it; else take first string as image_path/id.
-                if isinstance(onf, (list, tuple)) and len(onf) >= 2:
-                    meta = onf[1]
-                    if isinstance(meta, dict):
-                        return _norm_image_row(meta)
-                    if isinstance(meta, str):
-                        if ("/" in meta or "\\" in meta or "." in meta):
-                            return {"image_path": meta}
-                        return {"image_id": meta}
-                # if dict
-                if isinstance(onf, dict):
-                    return _norm_image_row(onf)
-                return {}
-            return {c: _img_from_on_frame(fr_u[2*c + 1]) for c in range(max(((len(fr_u)-1)//2), 0))}
+    # ---------- infer iteration structure if possible ----------
+    iteration = stim_log.get("iteration", None)
+    if iteration is not None:
+        try:
+            iteration = int(iteration)
+            per_iter = len(df_disp) // max(iteration, 1)
+            if per_iter > 0:
+                iter_labels = np.repeat(np.arange(1, iteration + 1), per_iter)
+                df_disp["iteration"] = iter_labels[: len(df_disp)]
+                df_disp["within_iteration_idx"] = (
+                    df_disp.groupby("iteration").cumcount() + 1
+                )
+        except Exception:
+            pass
 
-        cond_map = _cond_params_from_frames_unique(frames_unique)
-        cond_ids = ((idx[onset_frames] - 1) // 2).astype(int)
+    # ---------- attach useful global fields ----------
+    globals_like = (
+        "display_dur","midgap_dur","pregap_dur","postgap_dur",
+        "iteration","is_blank_block","coordinate","background"
+    )
+    for k in globals_like:
+        if k in stim_log and k not in df_disp.columns:
+            val = stim_log[k]
+            if isinstance(val, list):
+                val = tuple(val)
+            df_disp[k] = [val] * len(df_disp)
 
-        rows = []
-        for t, (f, cid) in enumerate(zip(onset_frames, cond_ids), start=1):
-            im = cond_map.get(int(cid), {})
-            r = {
-                "trial": t, "iteration": 0, "position": t-1,
-                "onset_frame": int(f), "onset_time_s": float(f / fr)
-            }
-            r.update(im)
-            rows.append(r)
-        df = pd.DataFrame(rows)
-        return _attach_globals(df)
+    return df_disp
 
-    # Nothing recognized
-    return pd.DataFrame([{"_extract_error": "StaticImages: no recognizable schedule fields present"}])
 
 
 def extract_StimulusSeparator(stim_key, stim_log, ctx) -> pd.DataFrame:
