@@ -191,6 +191,8 @@ if os.path.isfile(static_images_path):
     os.remove(static_images_path)
 si.wrap_images(si_images_folder)
 si.set_imgs_from_hdf5(static_images_path)
+assert hasattr(si, 'images_wrapped')
+assert si.images_wrapped.shape == (118, 288, 512)
 
 ds.set_stim(si)
 ds.trigger_display()

@@ -3365,98 +3365,70 @@ class StaticImages(Stim):
             self.images_dewrapped = None
 
     def set_imgs_from_hdf5(self, imgs_file_path):
-        """
-        set 3d arrays from a hdf5 file for display. Ideally the hdf5 file should be
-        the result from self.wrap_images() method. Only designed to work with wrapped
-        images
+        """Load wrapped (and optional dewrapped) images from an HDF5 file."""
+        import h5py, numpy as np
 
-        parameters
-        ----------
-        imgs_file_path : str
-            system path ot the hdf5 file. It should have at least one dataset named
-            'images_wrapped' containing a 3d array of wrapped images to display
-        """
-        with h5py.File(imgs_file_path, 'r') as img_f:
-            if len(img_f['images_wrapped/images'].shape) != 3:
-                raise ValueError('StaticImages: the input wrapped images should be a 3d array.')
+        with h5py.File(imgs_file_path, 'r') as f:
+            # ---- locate wrapped images dataset ONCE ----
+            grp_w = f.get('images_wrapped', None)
+            if grp_w is None or not isinstance(grp_w, h5py.Group):
+                raise KeyError(
+                    "Expected group 'images_wrapped' in HDF5. Top-level keys: "
+                    f"{list(f.keys())}"
+                )
+            ds_wrapped = grp_w.get('images', None)
+            if ds_wrapped is None or not isinstance(ds_wrapped, h5py.Dataset):
+                raise KeyError(
+                    "Expected dataset 'images_wrapped/images'. "
+                    f"Found keys in 'images_wrapped': {list(grp_w.keys())}"
+                )
 
-        if (img_f['images_wrapped/images'].shape[1],
-            img_f['images_wrapped/images'].shape[2]) != self.monitor.deg_coord_x.shape:
-            raise ValueError('StaticImages: the input wrapped images should have '
-                             'the same dimensions of the pixel resolution of '
-                             'downsampled monitor.')
+            # ---- validate dimensionality and monitor geometry ----
+            if len(ds_wrapped.shape) != 3:
+                raise ValueError(f"'images_wrapped/images' must be 3-D (frames,H,W); got {ds_wrapped.shape}.")
+            H, W = ds_wrapped.shape[1], ds_wrapped.shape[2]
+            if (H, W) != self.monitor.deg_coord_x.shape:
+                raise ValueError(
+                    "Wrapped images (H,W) must match downsampled monitor degree grid. "
+                    f"Got {(H, W)} vs {self.monitor.deg_coord_x.shape}."
+                )
 
-        try:
-            alt_w = img_f['images_wrapped/altitude'][()]
-        except Exception:
-            alt_w = None
+            # (optional) coordinate consistency if present
+            alt_w = grp_w.get('altitude', None)
+            if alt_w is not None:
+                alt_w = alt_w[()]
+                if alt_w.shape != self.monitor.deg_coord_y.shape or not np.array_equal(alt_w, self.monitor.deg_coord_y):
+                    raise ValueError("Altitude coord mismatch with monitor degree grid.")
+            azi_w = grp_w.get('azimuth', None)
+            if azi_w is not None:
+                azi_w = azi_w[()]
+                if azi_w.shape != self.monitor.deg_coord_x.shape or not np.array_equal(azi_w, self.monitor.deg_coord_x):
+                    raise ValueError("Azimuth coord mismatch with monitor degree grid.")
 
-        try:
-            azi_w = img_f['images_wrapped/azimuth'][()]
-        except Exception:
-            azi_w = None
+            # ---- load wrapped frames ----
+            self.images_wrapped = ds_wrapped[()]
 
-        if alt_w is not None:
-            if not np.array_equal(alt_w, self.monitor.deg_coord_y):
-                raise ValueError('the altitude coordinates of input wrapped images do not '
-                                 'match the wrapped monitor pixel altitude coordinates.')
-        if azi_w is not None:
-            if not np.array_equal(azi_w, self.monitor.deg_coord_x):
-                raise ValueError('the azimuth coordinates of input wrapped images do not '
-                                 'match the wrapped monitor pixel azimuth coordinates.')
+            # ---- optional dewrapped ----
+            self.images_dewrapped = None
+            self.altitude_dewrapped = None
+            self.azimuth_dewrapped  = None
 
-            self.images_wrapped = img_f['images_wrapped/images'][()]
-
-            if 'images_dewrapped' in img_f:
-                if len(img_f['images_dewrapped/images'].shape) != 3:
-                    print ('The images_dewrapped in the input file is not 3d. '
-                            'Set self.images_dewrapped to None.')
-                    self.images_dewrapped = None
-                    self.altitude_dewrapped = None
-                    self.azimuth_dewrapped = None
-
-                elif img_f['images_dewrapped/images'].shape[0] != self.images_wrapped.shape[0]:
-                    print ('The number of frames of images_dewrapped in the input file is different'
-                        'from the number of frames of self.images. Set self.images_dewrapped to None.')
-                    self.images_dewrapped = None
-                    self.altitude_dewrapped = None
-                    self.azimuth_dewrapped = None
+            grp_dw = f.get('images_dewrapped', None)
+            if isinstance(grp_dw, h5py.Group) and 'images' in grp_dw:
+                ds_dw = grp_dw['images']
+                if len(ds_dw.shape) != 3:
+                    print("images_dewrapped/images is not 3-D; setting images_dewrapped=None.")
+                elif ds_dw.shape[0] != self.images_wrapped.shape[0]:
+                    print("images_dewrapped frame count differs; setting images_dewrapped=None.")
                 else:
-                    self.images_dewrapped = img_f['images_dewrapped/images'][()]
-                    try:
-                        alt_d = img_f['images_dewrapped/altitude'][()]
-                        if alt_d.shape[0] != self.images_dewrapped.shape[1] or \
-                                        alt_d.shape[1] != self.images_dewrapped.shape[2]:
-                            print ('altitude coordinates of images_dewrapped in the input file have '
-                                'different shape as frames in self.images_dewrapped. Set'
-                                'self.altitude_dewrapped to None.')
-                            self.altitude_dewrapped = None
-                        else:
-                            self.altitude_dewrapped = alt_d
-                    except Exception:
-                        self.altitude_dewrapped = None
+                    self.images_dewrapped = ds_dw[()]
+                    alt_d = grp_dw.get('altitude', None)
+                    if isinstance(alt_d, h5py.Dataset) and alt_d.shape == self.images_dewrapped.shape[1:]:
+                        self.altitude_dewrapped = alt_d[()]
+                    azi_d = grp_dw.get('azimuth', None)
+                    if isinstance(azi_d, h5py.Dataset) and azi_d.shape == self.images_dewrapped.shape[1:]:
+                        self.azimuth_dewrapped = azi_d[()]
 
-                    try:
-                        azi_d = img_f['images_dewrapped/azimuth'][()]
-                        if azi_d.shape[0] != self.images_dewrapped.shape[1] or \
-                                        azi_d.shape[1] != self.images_dewrapped.shape[2]:
-                            print ('azimuth coordinates of images_dewrapped in the input file have '
-                                'different shape as frames in self.images_dewrapped. Set'
-                                'self.azimuth_dewrapped to None.')
-                            self.azimuth_dewrapped = None
-                        else:
-                            self.azimuth_dewrapped = azi_d
-                    except Exception:
-                        self.azimuth_dewrapped = None
-
-            else:
-                print ('Cannot find "images_dewrapped" dataset in the input file. '
-                    'Set self.images_dewrapped to None.')
-                self.images_dewrapped = None
-                self.altitude_dewrapped = None
-                self.azimuth_dewrapped = None
-
-        img_f.close()
 
     def _generate_frames_for_index_display(self):
         """
