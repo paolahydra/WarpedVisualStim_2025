@@ -176,7 +176,7 @@ si_display_dur = 0.250
 si_midgap_dur = 0.
 si_iteration = 2
 si_is_blank_block = True
-si_images_folder = os.path.join(os.path.dirname(rm.__file__), 'test', 'test_data')
+si_images_folder = os.path.join(os.path.dirname(rm.__file__), 'staticImages')
 
 si = stim.StaticImages(monitor=mon, indicator=ind, pregap_dur=2,
                        postgap_dur=2, coordinate='degree',

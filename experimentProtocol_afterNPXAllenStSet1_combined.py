@@ -36,7 +36,7 @@ ind = Indicator(mon, width_cm=ind_width_cm, height_cm=ind_height_cm,
 
 
 # General data settings
-ds_log_dir = r'D:\data\displaySequence'
+ds_log_dir = r'C:\data\visual_display_log'
 ds_backupdir = None
 ds_identifier = 'TEST'
 ds_display_iter = 1
@@ -180,9 +180,9 @@ si_img_center = (0., 60.)
 si_deg_per_pixel = (0.5, 0.5)
 si_display_dur = 0.250
 si_midgap_dur = 0.
-si_iteration = 2
+si_iteration = 1
 si_is_blank_block = True
-si_images_folder = os.path.join(os.path.dirname(rm.__file__), 'test', 'test_data')
+si_images_folder = os.path.join(os.path.dirname(rm.__file__), 'staticImages')
 
 si = stim.StaticImages(monitor=mon, indicator=ind, pregap_dur=2,
                        postgap_dur=2, coordinate='degree',
