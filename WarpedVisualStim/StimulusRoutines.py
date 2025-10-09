@@ -3218,7 +3218,8 @@ class StaticImages(Stim):
 
     def __init__(self, monitor, indicator, background=0., coordinate='degree',
                  img_center=(0., 60.), deg_per_pixel=(0.1, 0.1), display_dur=0.25,
-                 midgap_dur=0., iteration=1, pregap_dur=2., postgap_dur=3., is_blank_block=True):
+                 midgap_dur=0., iteration=1, pregap_dur=2., postgap_dur=3., is_blank_block=True,
+                 imgs_wrapped_tif=None, imgs_wrapped_hdf5=None, imgs_dewrapped_tif=None):
         """
         Initialize `StaticImages` stimulus object, inherits Parameters from `Stim` class
         """
@@ -3244,6 +3245,26 @@ class StaticImages(Stim):
         self.midgap_dur = float(midgap_dur)
         self.iteration = int(iteration)
         self.is_blank_block = bool(is_blank_block)
+
+        # Optional lazy-load sources (backward compatible)
+        self._imgs_wrapped_tif = imgs_wrapped_tif
+        self._imgs_wrapped_hdf5 = imgs_wrapped_hdf5
+        self._imgs_dewrapped_tif = imgs_dewrapped_tif
+
+    def _ensure_images_loaded(self):
+        """Ensure self.images_wrapped exists, try to lazy-load from provided paths."""
+        if hasattr(self, 'images_wrapped'):
+            return
+        if self._imgs_wrapped_hdf5:
+            self.set_imgs_from_hdf5(self._imgs_wrapped_hdf5)
+            return
+        if self._imgs_wrapped_tif:
+            self.set_imgs_from_tif(self._imgs_wrapped_tif, self._imgs_dewrapped_tif)
+            return
+        raise LookupError(
+            'StaticImages: missing "images_wrapped". '
+            'Call set_imgs_from_tif()/set_imgs_from_hdf5() or pass imgs_* to __init__.'
+        )
 
     @property
     def display_frame_num(self):
@@ -3355,10 +3376,9 @@ class StaticImages(Stim):
             system path ot the hdf5 file. It should have at least one dataset named
             'images_wrapped' containing a 3d array of wrapped images to display
         """
-        img_f = h5py.File(imgs_file_path, 'r')
-
-        if len(img_f['images_wrapped/images'].shape) != 3:
-            raise ValueError('StaticImages: the input wrapped images should be a 3d array.')
+        with h5py.File(imgs_file_path, 'r') as img_f:
+            if len(img_f['images_wrapped/images'].shape) != 3:
+                raise ValueError('StaticImages: the input wrapped images should be a 3d array.')
 
         if (img_f['images_wrapped/images'].shape[1],
             img_f['images_wrapped/images'].shape[2]) != self.monitor.deg_coord_x.shape:
@@ -3368,12 +3388,12 @@ class StaticImages(Stim):
 
         try:
             alt_w = img_f['images_wrapped/altitude'][()]
-        except:
+        except Exception:
             alt_w = None
 
         try:
             azi_w = img_f['images_wrapped/azimuth'][()]
-        except:
+        except Exception:
             azi_w = None
 
         if alt_w is not None:
@@ -3385,56 +3405,56 @@ class StaticImages(Stim):
                 raise ValueError('the azimuth coordinates of input wrapped images do not '
                                  'match the wrapped monitor pixel azimuth coordinates.')
 
-        self.images_wrapped = img_f['images_wrapped/images'][()]
+            self.images_wrapped = img_f['images_wrapped/images'][()]
 
-        if 'images_dewrapped' in img_f:
-            if not img_f['images_dewrapped/images'].shape != 3:
-                print ('The images_dewrapped in the input file is not 3d. '
-                       'Set self.images_dewrapped to None.')
-                self.images_dewrapped = None
-                self.altitude_dewrapped = None
-                self.azimuth_dewrapped = None
-
-            elif img_f['images_dewrapped/images'].shape[0] != self.images_wrapped.shape[0]:
-                print ('The number of frames of images_dewrapped in the input file is different'
-                       'from the number of frames of self.images. Set self.images_dewrapped to None.')
-                self.images_dewrapped = None
-                self.altitude_dewrapped = None
-                self.azimuth_dewrapped = None
-            else:
-                self.images_dewrapped = img_f['images_dewrapped/images'][()]
-                try:
-                    alt_d = img_f['images_dewrapped/altitude'][()]
-                    if alt_d.shape[0] != self.images_dewrapped.shape[1] or \
-                                    alt_d.shape[1] != self.images_dewrapped.shape[2]:
-                        print ('altitude coordinates of images_dewrapped in the input file have '
-                               'different shape as frames in self.images_dewrapped. Set'
-                               'self.altitude_dewrapped to None.')
-                        self.altitude_dewrapped = None
-                    else:
-                        self.altitude_dewrapped = alt_d
-                except:
+            if 'images_dewrapped' in img_f:
+                if len(img_f['images_dewrapped/images'].shape) != 3:
+                    print ('The images_dewrapped in the input file is not 3d. '
+                            'Set self.images_dewrapped to None.')
+                    self.images_dewrapped = None
                     self.altitude_dewrapped = None
-
-                try:
-                    azi_d = img_f['images_dewrapped/azimuth'][()]
-                    if azi_d.shape[0] != self.images_dewrapped.shape[1] or \
-                                    azi_d.shape[1] != self.images_dewrapped.shape[2]:
-                        print ('azimuth coordinates of images_dewrapped in the input file have '
-                               'different shape as frames in self.images_dewrapped. Set'
-                               'self.azimuth_dewrapped to None.')
-                        self.azimuth_dewrapped = None
-                    else:
-                        self.azimuth_dewrapped = azi_d
-                except:
                     self.azimuth_dewrapped = None
 
-        else:
-            print ('Cannot find "images_dewrapped" dataset in the input file. '
-                   'Set self.images_dewrapped to None.')
-            self.images_dewrapped = None
-            self.altitude_dewrapped = None
-            self.azimuth_dewrapped = None
+                elif img_f['images_dewrapped/images'].shape[0] != self.images_wrapped.shape[0]:
+                    print ('The number of frames of images_dewrapped in the input file is different'
+                        'from the number of frames of self.images. Set self.images_dewrapped to None.')
+                    self.images_dewrapped = None
+                    self.altitude_dewrapped = None
+                    self.azimuth_dewrapped = None
+                else:
+                    self.images_dewrapped = img_f['images_dewrapped/images'][()]
+                    try:
+                        alt_d = img_f['images_dewrapped/altitude'][()]
+                        if alt_d.shape[0] != self.images_dewrapped.shape[1] or \
+                                        alt_d.shape[1] != self.images_dewrapped.shape[2]:
+                            print ('altitude coordinates of images_dewrapped in the input file have '
+                                'different shape as frames in self.images_dewrapped. Set'
+                                'self.altitude_dewrapped to None.')
+                            self.altitude_dewrapped = None
+                        else:
+                            self.altitude_dewrapped = alt_d
+                    except Exception:
+                        self.altitude_dewrapped = None
+
+                    try:
+                        azi_d = img_f['images_dewrapped/azimuth'][()]
+                        if azi_d.shape[0] != self.images_dewrapped.shape[1] or \
+                                        azi_d.shape[1] != self.images_dewrapped.shape[2]:
+                            print ('azimuth coordinates of images_dewrapped in the input file have '
+                                'different shape as frames in self.images_dewrapped. Set'
+                                'self.azimuth_dewrapped to None.')
+                            self.azimuth_dewrapped = None
+                        else:
+                            self.azimuth_dewrapped = azi_d
+                    except Exception:
+                        self.azimuth_dewrapped = None
+
+            else:
+                print ('Cannot find "images_dewrapped" dataset in the input file. '
+                    'Set self.images_dewrapped to None.')
+                self.images_dewrapped = None
+                self.altitude_dewrapped = None
+                self.azimuth_dewrapped = None
 
         img_f.close()
 
@@ -3448,10 +3468,7 @@ class StaticImages(Stim):
             1. image index, non-negative integer
             2. indicator color, [-1., 1.]
         """
-        if not hasattr(self, 'images_wrapped'):
-            raise LookupError('StaticImages: cannot find attribute: "imgs_wrapped".'
-                              'Please use self.set_imgs_from_tif() or '
-                              'self.set_imgs_from_hdf5() to set the images.')
+        self._ensure_images_loaded()
 
         img_num = self.images_wrapped.shape[0]
         frames_unique = [(0, None, -1.)]
@@ -3506,6 +3523,8 @@ class StaticImages(Stim):
 
     def generate_movie_by_index(self):
         """ compute the stimulus movie to be displayed by index. """
+        # Ensure images exist even if caller skipped explicit set_*()
+        self._ensure_images_loaded()
         self.frames_unique, self.index_to_display = self._generate_display_index()
 
         # print '\n'.join([str(f) for f in self.frames_unique])
@@ -3522,10 +3541,12 @@ class StaticImages(Stim):
         indicator_width_min, indicator_width_max, \
         indicator_height_min, indicator_height_max = self.get_indicator_range()
 
-        mov = self.background * np.ones((len(self.frames_unique),
-                                         self.images_wrapped.shape[1],
-                                         self.images_wrapped.shape[2]),
-                                        dtype=np.float32)
+        mov = self.background * np.ones(
+            (len(self.frames_unique),
+             self.images_wrapped.shape[1],
+             self.images_wrapped.shape[2]),
+            dtype=np.float32
+        )
 
         for i, frame in enumerate(self.frames_unique):
 
@@ -3739,6 +3760,7 @@ class CombinedStimuli(Stim):
 
         self.stimuli = stimuli
         self.static_images_path = static_images_path
+        print(static_images_path)
 
     def generate_movie_by_index(self):
 

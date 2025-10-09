@@ -190,6 +190,7 @@ static_images_path = os.path.join(si_images_folder, 'wrapped_images_for_display.
 if os.path.isfile(static_images_path):
     os.remove(static_images_path)
 si.wrap_images(si_images_folder)
+si.set_imgs_from_hdf5(static_images_path)
 
 ds.set_stim(si)
 ds.trigger_display()
