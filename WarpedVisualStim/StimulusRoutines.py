@@ -5193,11 +5193,12 @@ class RandomizedUniformFlashes(Stim):
 
     def _build_random_schedule(self):
         """
-        Build a multiset in which each color appears exactly n_reps times, then shuffle.
+        Build a multiset where each color appears exactly n_reps times, then shuffle.
+        Uses rounding to avoid float key mismatches (e.g., -0.8 vs -0.8000000119).
         """
         rng = np.random.RandomState(self.rng_seed)
 
-        # Expanded sequence before shuffling
+        # Expanded sequence before shuffling (np.float32 to keep memory small)
         color_seq = np.concatenate([
             np.full(self.n_reps, float(c), dtype=np.float32) for c in self.colors
         ])
@@ -5207,19 +5208,38 @@ class RandomizedUniformFlashes(Stim):
         self._per_color_counts = {float(c): int(self.n_reps) for c in self.colors}
         self._total_flashes = int(color_seq.size)
 
-        # Build index timeline (frames_unique = [GAP] + [COLOR_i for each color])
-        gap_idx = 0
-        color_to_idx = {float(c): (i + 1) for i, c in enumerate(self.colors)}
-        self._color_to_idx = color_to_idx
+        # ---- Robust mapping: normalize with rounding on BOTH sides
+        def _norm(x, nd=2):
+            # round to nd decimals and convert to plain Python float
+            return round(float(x), nd)
 
+        gap_idx = 0
+        # Map normalized color -> unique frame index (1..M)
+        color_to_idx = {_norm(c): (i + 1) for i, c in enumerate(self.colors)}
+
+        # Convert sequence of colors -> sequence of indices (1..M)
+        color_idx_seq = []
+        for col in self._color_seq:
+            key = _norm(col)
+            if key not in color_to_idx:
+                # Fallback: try closest color if rounding failed (very unlikely)
+                # Find nearest in self.colors
+                arr = np.asarray([_norm(c) for c in self.colors], dtype=float)
+                nearest = int(np.argmin(np.abs(arr - key)))
+                key = _norm(self.colors[nearest])
+            color_idx_seq.append(color_to_idx[key])
+        color_idx_seq = np.asarray(color_idx_seq, dtype=int)
+
+        self._color_to_idx = color_to_idx  # for debugging/inspection
+
+        # ---- Build the timeline of indices (0=gap, 1..M=colors)
         timeline = []
         # Pre-gap
         timeline += [gap_idx] * self.pregap_frame_num
 
         # Flashes
-        for k, col in enumerate(self._color_seq):
-            timeline += [color_to_idx[float(col)]] * self.flash_frame_num
-            # midgap between flashes, not after the last one
+        for k, idx in enumerate(color_idx_seq):
+            timeline += [idx] * self.flash_frame_num
             if self.midgap_frame_num > 0 and (k < self._total_flashes - 1):
                 timeline += [gap_idx] * self.midgap_frame_num
 
@@ -5227,6 +5247,7 @@ class RandomizedUniformFlashes(Stim):
         timeline += [gap_idx] * self.postgap_frame_num
 
         self.index_to_display = timeline
+
 
     # ------------------------------ Index-mode generation ------------------------------
 
