@@ -416,92 +416,200 @@ def extract_StaticGratingCircle(stim_key, stim_log, ctx):
 
 def extract_RandomizedUniformFlashes(stim_key, stim_log, ctx):
     """
-    Per-flash table for RandomizedUniformFlashes, one row per ON onset.
-
+    Per-flash schedule for RandomizedUniformFlashes, one row per ON onset.
     Robust to:
-      - frames: 'frames_unique_compact' OR '_frames_unique_compact'
-      - indices: 'index_to_display' OR 'frame_config' (ints or dicts with 'frame_idx')
-      - refresh_rate from ctx['monitor']['refresh_rate']
+      - frames: 'frames_unique_compact' | '_frames_unique_compact' | 'frames_unique'
+      - indices: 'index_to_display' | 'frame_config' (ints or dicts with 'frame_idx')
+      - refresh rate keys: refresh_rate / refreshRate / RefreshRate / rr / fps
 
-    Output columns: onset_frame, onset_time_s, sf, ph, ori, con, radius (+ optional globals)
+    Output columns (best-effort):
+      trial, onset_frame, offset_frame, onset_time_s, offset_time_s,
+      unique_index_at_onset, color_at_onset,
+      measured_flash_frames, measured_flash_dur_s,
+      (optional) planned_flash_frames, planned_flash_dur_s, flash_frames_match,
+      (optional) logged_color_sequence, logged_vs_detected_match,
+      (optional) color_label (A/B) if st['colors'] present,
+      plus a few useful globals repeated per row.
     """
+    import numpy as np
+    import pandas as pd
 
-    # ---- resolve frames_unique_compact ----
-    frames_unique = None
-    for key in ("frames_unique_compact", "_frames_unique_compact"):
-        if key in stim_log and isinstance(stim_log[key], (list, tuple)):
-            frames_unique = stim_log[key]
-            break
-    if frames_unique is None:
-        return pd.DataFrame([{"_extract_error": "RUF: missing frames_unique_compact/_frames_unique_compact"}])
-
-    # ---- resolve index_to_display (frame indices over time) ----
-    if "index_to_display" in stim_log:
-        idx = np.asarray(stim_log["index_to_display"], dtype=int)
-    elif "frame_config" in stim_log:
-        fc = stim_log["frame_config"]
-        if len(fc) > 0 and isinstance(fc[0], dict) and "frame_idx" in fc[0]:
-            idx = np.asarray([int(d["frame_idx"]) for d in fc], dtype=int)
-        else:
-            idx = np.asarray(fc, dtype=int)
-    else:
-        return pd.DataFrame([{"_extract_error": "RUF: missing index_to_display/frame_config"}])
-
-    # ---- monitor refresh rate ----
-    fr = None
-    try:
+    # -------- helpers --------
+    def _get_refresh_rate(ctx):
+        cand = None
         mon = ctx.get("monitor") if isinstance(ctx, dict) else None
-        if mon and "refresh_rate" in mon:
-            fr = float(mon["refresh_rate"])
-    except Exception:
-        pass
-    if not fr or fr <= 0:
-        return pd.DataFrame([{"_extract_error": "RUF: missing/invalid monitor.refresh_rate"}])
+        if isinstance(mon, dict):
+            for k in ("refresh_rate","refreshRate","RefreshRate","rr","fps"):
+                if k in mon and mon[k]:
+                    cand = float(mon[k]); break
+        if not cand or cand <= 0:
+            # final fallback: try at top level
+            top = ctx.get("top") if isinstance(ctx, dict) else None
+            if isinstance(top, dict) and "monitor" in top and isinstance(top["monitor"], dict):
+                for k in ("refresh_rate","refreshRate","RefreshRate","rr","fps"):
+                    v = top["monitor"].get(k)
+                    if v:
+                        cand = float(v); break
+        if not cand or cand <= 0:
+            raise KeyError("monitor.refresh_rate not found")
+        return cand
 
-    # ---- condition id -> (sf, ph, ori, con, radius) from frames_unique ----
-    # Convention: 0 = GAP; for c in [0..n_cond-1]: ON = 2*c+1, OFF = 2*c+2
-    def cond_params(cid: int):
-        # frames_unique[2*cid + 1] is the ON frame; [1:6] holds (sf, ph, ori, con, radius)
-        fr_tuple = frames_unique[2 * cid + 1]
-        return tuple(fr_tuple[1:6])
+    def _resolve_frames_unique_and_idx(stim_log, ctx):
+        # frames_unique* from stim_log first
+        fu = None
+        for k in ("frames_unique_compact","_frames_unique_compact","frames_unique"):
+            if k in stim_log and isinstance(stim_log[k], (list, tuple)):
+                fu = stim_log[k]; break
+        # idx: index_to_display preferred, else frame_config
+        idx = None
+        if "index_to_display" in stim_log:
+            idx = np.asarray(stim_log["index_to_display"], dtype=int)
+        elif "frame_config" in stim_log:
+            fc = stim_log["frame_config"]
+            if len(fc) > 0 and isinstance(fc[0], dict) and "frame_idx" in fc[0]:
+                idx = np.asarray([int(d["frame_idx"]) for d in fc], dtype=int)
+            else:
+                idx = np.asarray(fc, dtype=int)
 
-    # ---- detect ON onsets ----
-    is_gap = (idx == 0)
-    is_on  = (~is_gap) & (idx % 2 == 1)
-    onset_mask = is_on & np.r_[True, idx[1:] != idx[:-1]]
-    onset_frames = np.flatnonzero(onset_mask)
-    if onset_frames.size == 0:
-        return pd.DataFrame([{"_extract_error": "RUF: no ON onsets detected"}])
+        # If still missing, check ctx['top'] (rare)
+        if (fu is None or idx is None) and isinstance(ctx.get("top"), dict):
+            top = ctx["top"]
+            # sometimes stored at top['stimulation'] as a parallel view
+            stim_top = top.get("stimulation", {})
+            if fu is None:
+                for k in ("frames_unique_compact","_frames_unique_compact","frames_unique"):
+                    v = stim_top.get(k)
+                    if isinstance(v, (list, tuple)):
+                        fu = v; break
+            if idx is None:
+                if "index_to_display" in stim_top:
+                    idx = np.asarray(stim_top["index_to_display"], dtype=int)
+                elif "frame_config" in stim_top:
+                    fc = stim_top["frame_config"]
+                    if len(fc) > 0 and isinstance(fc[0], dict) and "frame_idx" in fc[0]:
+                        idx = np.asarray([int(d["frame_idx"]) for d in fc], dtype=int)
+                    else:
+                        idx = np.asarray(fc, dtype=int)
 
-    cond_ids = ((idx[onset_frames] - 1) // 2).astype(int)
+        if fu is None or idx is None:
+            raise KeyError("RUF: missing frames_unique*/index_to_display/frame_config")
 
-    # ---- assemble rows ----
-    rows = []
-    for f, cid in zip(onset_frames, cond_ids):
+        fu = np.array(fu, dtype=object)
+        return idx, fu
+
+    def _detect_onsets_offsets(idx, fu):
+        """
+        frames_unique rows expected like: (is_display, indicator_value, display_color)
+        Identify ON runs among indices that map to rows with is_display==1.
+        """
+        # If fu doesn't have at least 3 fields per row, fail loudly.
         try:
-            sf, ph, ori, con, rad = cond_params(int(cid))
+            is_display = fu[:, 0].astype(int)
+            display_color = fu[:, 2]  # may be float/int
+        except Exception as e:
+            raise ValueError(f"RUF: frames_unique shape unexpected: {fu.shape}") from e
+
+        color_indices = np.where(is_display == 1)[0]
+        if color_indices.size == 0:
+            raise ValueError("RUF: no ON states in frames_unique (is_display==1)")
+
+        color_map = {int(i): float(display_color[i]) for i in color_indices}
+        is_on = np.isin(idx, color_indices)
+
+        onset_mask  = is_on & np.r_[True, idx[1:] != idx[:-1]]
+        offset_mask = is_on & np.r_[idx[:-1] != idx[1:], True]
+
+        onset_frames  = np.flatnonzero(onset_mask)
+        offset_frames = np.flatnonzero(offset_mask)
+
+        return onset_frames, offset_frames, color_map
+
+    # -------- main extraction --------
+    rr = _get_refresh_rate(ctx)
+    idx, fu = _resolve_frames_unique_and_idx(stim_log, ctx)
+    onset_frames, offset_frames, color_map = _detect_onsets_offsets(idx, fu)
+
+    n = onset_frames.size
+    onset_idx_vals = idx[onset_frames]
+    color_at_onset = [color_map.get(int(iv), np.nan) for iv in onset_idx_vals]
+
+    # Optional fields stored in stim_log
+    st = stim_log  # alias
+    color_seq_logged  = st.get("color_sequence_per_flash", None)
+    flash_frame_num   = st.get("flash_frame_num", st.get("flash_frames"))
+    midgap_frame_num  = st.get("midgap_frame_num", st.get("midgap_frames"))
+    pregap_frame_num  = st.get("pregap_frame_num", st.get("pre_gap_frame_num"))
+    postgap_frame_num = st.get("postgap_frame_num", st.get("post_gap_frame_num"))
+    n_reps            = st.get("n_reps", None)
+    rng_seed          = st.get("rng_seed", None)
+    colors_tuple      = st.get("colors", None)
+
+    df = pd.DataFrame({
+        "trial":            np.arange(1, n+1, dtype=int),
+        "onset_frame":      onset_frames,
+        "offset_frame":     offset_frames,
+        "onset_time_s":     onset_frames / rr,
+        "offset_time_s":    offset_frames / rr,
+        "unique_index_at_onset": onset_idx_vals,
+        "color_at_onset":   color_at_onset,
+    })
+
+    # measured duration (inclusive)
+    df["measured_flash_frames"] = (df["offset_frame"] - df["onset_frame"] + 1).astype(int)
+    df["measured_flash_dur_s"]  = df["measured_flash_frames"] / rr
+
+    # planned duration (if stored)
+    if flash_frame_num is not None:
+        try:
+            pf = int(flash_frame_num)
+            df["planned_flash_frames"] = pf
+            df["planned_flash_dur_s"]  = pf / rr
+            df["flash_frames_match"]   = df["measured_flash_frames"] == df["planned_flash_frames"]
         except Exception:
-            rows.append({"_extract_error": f"RUF: bad cond id {int(cid)}", "onset_frame": int(f)})
-            continue
-        rows.append({
-            "onset_frame": int(f),
-            "onset_time_s": float(f / fr),
-            "sf": sf, "ph": ph, "ori": ori, "con": con, "radius": rad
-        })
+            pass
 
-    df = pd.DataFrame(rows)
+    # logged randomized order (if stored)
+    if isinstance(color_seq_logged, (list, tuple)) and len(color_seq_logged) == n:
+        try:
+            logged = np.asarray(color_seq_logged, dtype=float)
+            df["logged_color_sequence"]    = logged
+            df["logged_vs_detected_match"] = np.isclose(logged, df["color_at_onset"].astype(float))
+        except Exception:
+            df["logged_color_sequence"]    = color_seq_logged
+            df["logged_vs_detected_match"] = None
 
-    # ---- optional: attach useful globals repeated per row ----
-    globals_like = ("flash_dur", "midgap_dur", "block_dur", "iteration", "is_blank_block",
-                    "coordinate", "background", "center")
-    for k in globals_like:
-        if k in stim_log and k not in df.columns:
-            val = stim_log[k]
-            if isinstance(val, list):
-                val = tuple(val)
-            df[k] = [val] * len(df)
+    # A/B labeling if exactly two colors were used
+    if isinstance(colors_tuple, (list, tuple)) and len(colors_tuple) == 2:
+        cA, cB = float(colors_tuple[0]), float(colors_tuple[1])
+        def _ab(c):
+            try:
+                return "A" if np.isclose(float(c), cA) else ("B" if np.isclose(float(c), cB) else "unknown")
+            except Exception:
+                return "unknown"
+        df["color_label"] = [ _ab(c) for c in df["color_at_onset"] ]
+
+    # repeat a few useful globals per row
+    globals_like = ("flash_frame_num","midgap_frame_num","pregap_frame_num","postgap_frame_num",
+                    "n_reps","rng_seed","colors","coordinate","background")
+    gl_vals = {
+        "flash_frame_num":   flash_frame_num,
+        "midgap_frame_num":  midgap_frame_num,
+        "pregap_frame_num":  pregap_frame_num,
+        "postgap_frame_num": postgap_frame_num,
+        "n_reps":            n_reps,
+        "rng_seed":          rng_seed,
+        "colors":            tuple(colors_tuple) if isinstance(colors_tuple, (list, tuple)) else colors_tuple,
+        "coordinate":        st.get("coordinate"),
+        "background":        st.get("background"),
+    }
+    for k, v in gl_vals.items():
+        if v is not None and k not in df.columns:
+            if isinstance(v, list):
+                v = tuple(v)
+            df[k] = [v] * len(df)
 
     return df
+
 
 
 def extract_StaticImages(stim_key, stim_log, ctx):
