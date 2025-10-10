@@ -264,105 +264,179 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
 
 def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
     """
-    Frame-level extractor for DriftingGratingCircle with real onset/offset frames.
+    Trial-level extractor for DriftingGratingCircle (single center).
+    - Collapses consecutive ON frames that share (iteration, sf, tf, direction, contrast, center)
+      into a single trial.
+    - Uses per-frame 'center' when present; otherwise falls back to global stim_log['center'].
+    - Does NOT add 'stim_key'/'stim_class' (let your ensure_identity_cols() handle that).
+
+    Returns columns (order):
+      ['trial','iteration','onset_frame','offset_frame','sf','tf','direction','contrast',
+       'radius','center','block_dur','midgap_dur','pregap_dur','postgap_dur',
+       'is_random_start_phase','coordinate','background','smooth_width_ratio','is_smooth_edge']
     """
     import numpy as np
     import pandas as pd
 
-    # ---- refresh rate ----
-    rr = None
-    mon = ctx.get("monitor") if isinstance(ctx, dict) else None
-    if isinstance(mon, dict):
-        for k in ("refresh_rate","refreshRate","RefreshRate","rr","fps"):
-            if k in mon and mon[k]:
-                rr = float(mon[k]); break
-    if rr is None or rr <= 0:
-        rr = 60.0
-    dt = 1.0 / rr
+    if not isinstance(stim_log, dict):
+        raise ValueError("stim_log must be a dict")
+    if "frames_unique" not in stim_log or "index_to_display" not in stim_log:
+        raise ValueError("stim_log must contain 'frames_unique' and 'index_to_display'")
 
-    # ---- inputs ----
-    frames_unique = stim_log.get("frames_unique")
-    if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 3:
-        raise ValueError("frames_unique missing or malformed")
+    fu = np.array(stim_log["frames_unique"], dtype=object)
     idx = np.asarray(stim_log["index_to_display"], dtype=int)
 
-    fu = np.array(frames_unique, dtype=object)
+    # --- center (global) fallback for single-circle stimulus ---
+    def _as_center_tuple(c):
+        if isinstance(c, (list, tuple, np.ndarray)) and len(c) == 2:
+            try:
+                return (float(c[0]), float(c[1]))
+            except Exception:
+                return tuple(c.tolist()) if isinstance(c, np.ndarray) else tuple(c)
+        return c
 
-    # Robust is_display extraction (treat None as 0)
-    def _is_disp(fr):
-        try:
-            x = fr[0]
-            return int(x) if x is not None else 0
-        except Exception:
-            return 0
+    center_global = _as_center_tuple(
+        stim_log.get("center", stim_log.get("centre", np.nan))
+    )
 
-    is_display = np.array([_is_disp(fr) for fr in fu], dtype=int)
-    on_indices = np.where(is_display == 1)[0]
-    if on_indices.size == 0:
-        raise ValueError("No ON states in frames_unique (is_display==1)")
+    # ---- helpers ----
+    def _is_seq(x):
+        return isinstance(x, (list, tuple, np.ndarray))
 
-    # ON/OFF runs
-    is_on = np.isin(idx, on_indices)
-    onset_mask  = is_on & np.r_[True, idx[1:] != idx[:-1]]
-    offset_mask = is_on & np.r_[idx[:-1] != idx[1:], True]
-    onset_frames  = np.flatnonzero(onset_mask)
-    offset_frames = np.flatnonzero(offset_mask)
-    if onset_frames.size == 0:
-        raise ValueError("No ON transitions detected")
-    onset_idx_vals = idx[onset_frames]
+    def _is_on_entry(entry):
+        if isinstance(entry, dict):
+            for k in ("is_display", "display", "is_on", "on"):
+                if k in entry:
+                    return bool(entry[k])
+            for k in ("sf", "tf", "dire", "direction", "con", "contrast"):
+                if k in entry:
+                    return True
+            return False
+        if _is_seq(entry) and len(entry) > 0:
+            try:
+                return float(entry[0]) == 1.0
+            except Exception:
+                return False
+        return False
 
-    # Condition id from ON index: ON=2*c+1 → c=(i-1)//2
-    n_cond = (len(frames_unique) - 1) // 2
+    def _params_from_entry(entry):
+        """Return (sf, tf, direction, contrast, radius, center_resolved)."""
+        sf = tf = direction = contrast = radius = center = np.nan
+        if isinstance(entry, dict):
+            sf = entry.get("sf", sf)
+            tf = entry.get("tf", tf)
+            direction = entry.get("direction", entry.get("dire", direction))
+            contrast  = entry.get("contrast",  entry.get("con",  contrast))
+            radius = entry.get("radius", radius)
+            center = entry.get("center", entry.get("centre", center))
+        elif _is_seq(entry):
+            e = entry.tolist() if isinstance(entry, np.ndarray) else entry
+            # Typical DG layout: (1, 1, sf, tf, dir, con, radius, center, phase, ...)
+            if len(e) >= 8 and float(e[0]) == 1.0:
+                sf, tf, direction, contrast, radius, center = e[2], e[3], e[4], e[5], e[6], e[7]
+            elif len(e) >= 7:  # fallback: [flag, sf, tf, dir, con, radius, center, ...]
+                sf, tf, direction, contrast, radius, center = e[1], e[2], e[3], e[4], e[5], e[6]
+        center = _as_center_tuple(center)
+        # Resolve center: prefer per-frame if valid tuple, else global
+        center_resolved = center if isinstance(center, tuple) and len(center) == 2 else center_global
+        return sf, tf, direction, contrast, radius, center_resolved
 
-    def _params_from_on_frame(fr):
-        """
-        Accepts the ON-frame entry and extracts (sf, tf, dire, con, radius).
-        Works for list/tuple or dict payloads.
-        """
-        if isinstance(fr, dict):
-            sf   = fr.get("sf")
-            tf   = fr.get("tf")
-            dire = fr.get("dire", fr.get("direction"))
-            con  = fr.get("con",  fr.get("contrast"))
-            rad  = fr.get("radius")
-            return sf, tf, dire, con, rad
-        if isinstance(fr, (list, tuple)):
-            # Common layout: [flag, sf, tf, dire, con, radius, ...]
-            if len(fr) >= 6:
-                return fr[1], fr[2], fr[3], fr[4], fr[5]
-        # Fallback: fill NaNs
-        return (np.nan, np.nan, np.nan, np.nan, np.nan)
+    is_on = np.array([_is_on_entry(x) for x in fu], dtype=bool)
 
-    cond_ids = ((onset_idx_vals - 1) // 2).astype(int)
-    rows = []
-    for i, (f_on, f_off, cid) in enumerate(zip(onset_frames, offset_frames, cond_ids), start=1):
-        if 0 <= cid < n_cond:
-            on_fr = frames_unique[2 * cid + 1]
-        else:
-            on_fr = None
-        sf, tf, dire, con, rad = _params_from_on_frame(on_fr) if on_fr is not None else (np.nan,)*5
-        rows.append({
-            "trial": i,
-            "onset_frame": int(f_on),
-            "offset_frame": int(f_off),
-            "onset_time_s": float(f_on * dt),
-            "offset_time_s": float((f_off + 1) * dt),
-            "sf": sf, "tf": tf, "dire": dire, "con": con, "radius": rad,
+    # iteration (global default; per-entry may override)
+    iteration_global = stim_log.get("iteration", 1)
+    try:
+        iteration_global = int(iteration_global)
+    except Exception:
+        pass
+
+    # ---- collect ON frames ----
+    per_frame = []
+    for fnum, uix in enumerate(idx):
+        if not (0 <= uix < fu.shape[0]):
+            continue
+        if not is_on[uix]:
+            continue
+        entry = fu[uix]
+        sf, tf, direction, contrast, radius, center_resolved = _params_from_entry(entry)
+        it = iteration_global
+        if isinstance(entry, dict) and "iteration" in entry:
+            try:
+                it = int(entry["iteration"])
+            except Exception:
+                it = entry["iteration"]
+        per_frame.append({
+            "frame": int(fnum),
+            "iteration": it,
+            "sf": sf, "tf": tf, "direction": direction, "contrast": contrast,
+            "radius": radius, "center": center_resolved,
         })
+
+    if not per_frame:
+        raise ValueError("No ON frames detected in index_to_display mapping.")
+
+    # ---- collapse into trials ----
+    def _trial_key(d):
+        # center is constant (global) for this stimulus, but include it in the key
+        # so schema matches DG-Multiple and behavior is consistent.
+        return (d["iteration"], d["sf"], d["tf"], d["direction"], d["contrast"], d["center"])
+
+    rows, start, trial = [], 0, 0
+    while start < len(per_frame):
+        trial += 1
+        k = _trial_key(per_frame[start])
+        onset = per_frame[start]["frame"]
+        end = start
+        while (end + 1 < len(per_frame)
+               and _trial_key(per_frame[end + 1]) == k
+               and per_frame[end + 1]["frame"] == per_frame[end]["frame"] + 1):
+            end += 1
+        offset = per_frame[end]["frame"]
+        d0 = per_frame[start]
+        rows.append({
+            "trial": trial,
+            "iteration": d0["iteration"],
+            "onset_frame": onset,
+            "offset_frame": offset,
+            "sf": d0["sf"],
+            "tf": d0["tf"],
+            "direction": d0["direction"],
+            "contrast": d0["contrast"],
+            "radius": d0["radius"],
+            "center": d0["center"],  # constant across rows unless per-frame overrides exist
+        })
+        start = end + 1
 
     df = pd.DataFrame(rows)
 
-    # Attach useful globals per row
-    for k in ("block_dur","midgap_dur","iteration","is_blank_block",
-              "coordinate","background","center","is_random_start_phase",
-              "is_smooth_edge","smooth_width_ratio"):
-        if k in stim_log and k not in df.columns:
-            v = stim_log[k]
-            if isinstance(v, list):
-                v = tuple(v)
-            df[k] = [v] * len(df)
+    # ---- attach globals (replicated per row) ----
+    globals_map = {
+        "block_dur":             stim_log.get("block_dur", np.nan),
+        "midgap_dur":            stim_log.get("midgap_dur", np.nan),
+        "pregap_dur":            stim_log.get("pregap_dur", np.nan),
+        "postgap_dur":           stim_log.get("postgap_dur", np.nan),
+        "is_random_start_phase": stim_log.get("is_random_start_phase", False),
+        "coordinate":            stim_log.get("coordinate", None),
+        "background":            stim_log.get("background", np.nan),
+        "smooth_width_ratio":    stim_log.get("smooth_width_ratio", np.nan),
+        "is_smooth_edge":        stim_log.get("is_smooth_edge", False),
+    }
+    for k, v in globals_map.items():
+        if isinstance(v, list):
+            v = tuple(v)
+        df[k] = v
 
-    return df
+    requested = [
+        "trial","iteration","onset_frame","offset_frame",
+        "sf","tf","direction","contrast","radius","center",
+        "block_dur","midgap_dur","pregap_dur","postgap_dur",
+        "is_random_start_phase","coordinate","background","smooth_width_ratio","is_smooth_edge",
+    ]
+    for col in requested:
+        if col not in df.columns:
+            df[col] = np.nan
+    return df[requested]
+
 
 
 
