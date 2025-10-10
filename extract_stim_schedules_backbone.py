@@ -131,57 +131,69 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
     fu = np.array(frames_unique, dtype=object)
 
     # ---- helpers: detect ON entries and extract parameters from a frames_unique entry ----
+    def _is_seq(x):
+        return isinstance(x, (list, tuple, np.ndarray))
+
     def _is_on_entry(entry):
-        # Minimal assumptions:
-        # 1) If dict and has an explicit flag, use it.
+        # dict case (unchanged)
         if isinstance(entry, dict):
             for k in ("is_display", "display", "is_on", "on"):
                 if k in entry:
-                    return 1 if entry[k] else 0
-            # Heuristic: if it looks like a param dict (has sf/tf/dir/contrast),
-            # treat as ON; OFF entries typically lack these.
+                    return bool(entry[k])
             for k in ("sf", "tf", "dire", "direction", "con", "contrast"):
                 if k in entry:
-                    return 1
-            return 0
-        # 2) If tuple/list, first element often encodes ON(1)/OFF(0).
-        if isinstance(entry, (list, tuple)) and len(entry) > 0:
+                    return True
+            return False
+        # NEW: accept numpy arrays in addition to list/tuple
+        if _is_seq(entry) and len(entry) > 0:
+            e0 = entry[0]
             try:
-                return 1 if float(entry[0]) == 1 else 0
+                # In your DG logs, ON frames look like:
+                # (1, 1, sf, tf, direction, contrast, radius, center, phase, ...)
+                return float(e0) == 1.0
             except Exception:
-                return 0
-        return 0
+                return False
+        return False
 
     def _as_center_tuple(c):
-        if isinstance(c, (list, tuple)) and len(c) == 2:
-            return (float(c[0]), float(c[1]))
-        return c  # leave as-is if malformed; equality will then be exact
+        if isinstance(c, (list, tuple, np.ndarray)) and len(c) == 2:
+            try:
+                return (float(c[0]), float(c[1]))
+            except Exception:
+                return tuple(c.tolist()) if isinstance(c, np.ndarray) else tuple(c)
+        return c
 
     def _params_from_entry(entry):
-        """
-        Return (sf, tf, direction, contrast, radius, center).
-        Keep names consistent and leave values as-is when missing (np.nan or None).
-        """
+        """Return (sf, tf, direction, contrast, radius, center)."""
         sf = tf = direction = contrast = radius = center = np.nan
         if isinstance(entry, dict):
-            # Flexible key mapping
             sf = entry.get("sf", sf)
             tf = entry.get("tf", tf)
             direction = entry.get("direction", entry.get("dire", direction))
             contrast = entry.get("contrast", entry.get("con", contrast))
             radius = entry.get("radius", radius)
             center = entry.get("center", entry.get("centre", center))
-        elif isinstance(entry, (list, tuple)):
-            # Common layout: [flag, sf, tf, dire, con, radius, center, ...]
-            if len(entry) >= 7:
-                sf = entry[1]
-                tf = entry[2]
-                direction = entry[3]
-                contrast = entry[4]
-                radius = entry[5]
-                center = entry[6]
+        elif _is_seq(entry):
+            e = entry.tolist() if isinstance(entry, np.ndarray) else entry
+            # Your DG arrays are length ≥ 10: (1, 1, sf, tf, dir, con, radius, center, phase, ...)
+            if len(e) >= 8 and float(e[0]) == 1.0:
+                sf        = e[2]
+                tf        = e[3]
+                direction = e[4]
+                contrast  = e[5]
+                radius    = e[6]
+                center    = e[7]
+            elif len(e) >= 7:
+                # fallback layout: [flag, sf, tf, dir, con, radius, center, ...]
+                sf        = e[1]
+                tf        = e[2]
+                direction = e[3]
+                contrast  = e[4]
+                radius    = e[5]
+                center    = e[6]
         center = _as_center_tuple(center)
         return sf, tf, direction, contrast, radius, center
+
 
     # Build a mask telling whether a frames_unique entry is ON
     is_on_entry = np.array([_is_on_entry(x) for x in fu], dtype=bool)
