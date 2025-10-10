@@ -89,11 +89,6 @@ def ensure_identity_cols(df: pd.DataFrame, stim_key: str, stim_class: str) -> pd
 
 # ---------- YOUR extractors: plug your working code here ----------
 def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
-    """
-    Real per-presentation onsets/offsets for DGMC.
-    Groups consecutive frames that share the same condition (sf, tf, dire, con, radius, center),
-    ignoring per-frame phase. Robust to varied frames_unique layouts.
-    """
     import numpy as np
     import pandas as pd
 
@@ -109,95 +104,56 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
     dt = 1.0 / rr
 
     # inputs
-    frames_unique = stim_log.get("frames_unique")
-    if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 1:
-        raise ValueError("frames_unique missing or malformed")
     idx = np.asarray(stim_log["index_to_display"], dtype=int)
+    all_conds = stim_log.get("all_conditions")  # list of (sf, tf, dire, con, radius, center) or dicts
+    if not isinstance(all_conds, (list, tuple)) or len(all_conds) == 0:
+        raise ValueError("DGMC: missing or empty 'all_conditions'")
 
-    fu = np.array(frames_unique, dtype=object)
+    # cond_id from unique index stream
+    cond_stream = np.full(idx.shape, None, dtype=object)
+    on_mask = idx > 0
+    cond_stream[on_mask] = ((idx[on_mask] - 1) // 2).astype(int)
 
-    def _is_display_flag(fr):
-        try:
-            x = fr[0]
-            return int(bool(x))
-        except Exception:
-            return 0
-
-    def _cond_tuple_from_frame(fr):
-        """
-        Extract condition key (sf, tf, dire, con, radius, center) from a display frame.
-        - For dicts, read by keys.
-        - For tuples, harvest first 5 numeric params after flag (sf..radius),
-          and the first 2-number sequence as center if present.
-        """
-        # dict-like
-        if isinstance(fr, dict):
-            sf   = fr.get("sf")
-            tf   = fr.get("tf")
-            dire = fr.get("dire", fr.get("direction"))
-            con  = fr.get("con",  fr.get("contrast"))
-            rad  = fr.get("radius")
-            cen  = fr.get("center", fr.get("centre"))
-            if isinstance(cen, list):
-                cen = tuple(cen)
-            if any(v is None for v in (sf, tf, dire, con, rad)) or cen is None:
-                pass
-            else:
-                return (sf, tf, dire, con, rad, cen)
-
-        # sequence-like
-        if isinstance(fr, (list, tuple)) and len(fr) >= 2:
-            nums = []
-            center = None
-            for v in fr[1:]:
-                if isinstance(v, (int, float, np.integer, np.floating)):
-                    if len(nums) < 5:
-                        nums.append(float(v))
-                elif isinstance(v, (tuple, list)) and len(v) == 1 and isinstance(v[0], (int, float, np.integer, np.floating)):
-                    if len(nums) < 5:
-                        nums.append(float(v[0]))
-                elif isinstance(v, (tuple, list)) and center is None and len(v) in (2, 3) and all(isinstance(x, (int, float, np.integer, np.floating)) for x in v):
-                    center = tuple(float(x) for x in v[:2])  # keep 2D
-                # else: ignore (phase vectors etc.)
-                if len(nums) >= 5 and center is not None:
-                    break
-            if len(nums) >= 5 and center is not None:
-                sf, tf, dire, con, rad = nums[:5]
-                return (sf, tf, dire, con, rad, center)
-
-        return None
-
-    # Map unique index -> condition key (or None)
-    is_display = np.array([_is_display_flag(fr) for fr in fu], dtype=int)
-    cond_key_for_uix = [None] * len(fu)
-    for uix, fr in enumerate(fu):
-        if is_display[uix] == 1:
-            cond_key_for_uix[uix] = _cond_tuple_from_frame(fr)
-
-    cond_stream = np.array([cond_key_for_uix[i] if 0 <= i < len(cond_key_for_uix) else None
-                            for i in idx], dtype=object)
-
-    prev_cond = np.r_[None, cond_stream[:-1]]
-    next_cond = np.r_[cond_stream[1:], None]
-
-    onset_mask  = [(c is not None) and (pc is None or c != pc) for c, pc in zip(cond_stream, prev_cond)]
-    offset_mask = [(c is not None) and (nc is None or c != nc) for c, nc in zip(cond_stream, next_cond)]
+    prev_c = np.r_[None, cond_stream[:-1]]
+    next_c = np.r_[cond_stream[1:], None]
+    onset_mask  = [(c is not None) and (pc is None or c != pc) for c, pc in zip(cond_stream, prev_c)]
+    offset_mask = [(c is not None) and (nc is None or c != nc) for c, nc in zip(cond_stream, next_c)]
 
     onset_frames  = np.flatnonzero(onset_mask)
     offset_frames = np.flatnonzero(offset_mask)
     if onset_frames.size == 0:
-        n_disp = int(np.sum([x is not None for x in cond_key_for_uix]))
-        raise ValueError(f"No ON presentations detected after grouping by condition (parsable display states: {n_disp})")
+        raise ValueError("DGMC: no ON presentations detected from cond_id stream")
+
+    def _parse_cond(p):
+        # dict
+        if isinstance(p, dict):
+            sf   = p.get("sf")
+            tf   = p.get("tf")
+            dire = p.get("dire", p.get("direction"))
+            con  = p.get("con",  p.get("contrast"))
+            rad  = p.get("radius")
+            cen  = p.get("center", p.get("centre"))
+            if isinstance(cen, list):
+                cen = tuple(cen)
+            return sf, tf, dire, con, rad, cen
+        # tuple/list (sf, tf, dire, con, radius, center)
+        if isinstance(p, (list, tuple)) and len(p) >= 6:
+            cen = p[5]
+            if isinstance(cen, list):
+                cen = tuple(cen)
+            return p[0], p[1], p[2], p[3], p[4], cen
+        return (np.nan, np.nan, np.nan, np.nan, np.nan, (np.nan, np.nan))
 
     rows = []
     for i, (f_on, f_off) in enumerate(zip(onset_frames, offset_frames), start=1):
-        key = cond_stream[f_on]  # (sf, tf, dire, con, radius, center)
-        if key is None:
+        c = cond_stream[f_on]
+        if c is None or c < 0 or c >= len(all_conds):
             sf=tf=dire=con=rad=np.nan; cen=(np.nan, np.nan)
         else:
-            sf, tf, dire, con, rad, cen = key
+            sf, tf, dire, con, rad, cen = _parse_cond(all_conds[int(c)])
         rows.append({
             "trial": i,
+            "cond_id": int(c) if c is not None else -1,
             "onset_frame": int(f_on),
             "offset_frame": int(f_off),
             "onset_time_s": float(f_on * dt),
@@ -208,7 +164,6 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
 
     df = pd.DataFrame(rows)
 
-    # attach globals
     for k in ("block_dur","midgap_dur","iteration","is_blank_block",
               "coordinate","background","center_list",
               "is_random_start_phase","is_smooth_edge","smooth_width_ratio"):
@@ -225,12 +180,8 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
 
 
 
+
 def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
-    """
-    Real per-presentation onsets/offsets for DriftingGratingCircle.
-    Groups consecutive frames that share the same condition (sf, tf, dire, con, radius),
-    ignoring per-frame phase. Robust to varied frames_unique layouts.
-    """
     import numpy as np
     import pandas as pd
 
@@ -246,96 +197,53 @@ def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
     dt = 1.0 / rr
 
     # inputs
-    frames_unique = stim_log.get("frames_unique")
-    if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 1:
-        raise ValueError("frames_unique missing or malformed")
     idx = np.asarray(stim_log["index_to_display"], dtype=int)
+    all_conds = stim_log.get("all_conditions")  # list of (sf, tf, dire, con, radius) or dicts
+    if not isinstance(all_conds, (list, tuple)) or len(all_conds) == 0:
+        raise ValueError("DGC: missing or empty 'all_conditions'")
 
-    fu = np.array(frames_unique, dtype=object)
+    # Build cond_id stream: None for gap/blank; integer for ON/OFF (use the ON’s c)
+    cond_stream = np.full(idx.shape, None, dtype=object)
+    on_mask = idx > 0  # treat 0 as GAP/blank
+    cond_stream[on_mask] = ((idx[on_mask] - 1) // 2).astype(int)
 
-    def _is_display_flag(fr):
-        # Treat any truthy/nonzero as display; handle None safely
-        try:
-            x = fr[0]
-            return int(bool(x))
-        except Exception:
-            return 0
-
-    def _cond_tuple_from_frame(fr):
-        """
-        Extract a stable condition key (sf, tf, dire, con, radius) from a display frame.
-        Works for dicts or heterogeneous tuples; ignores phase and other per-frame info.
-        Returns None if cannot parse.
-        """
-        # dict-like
-        if isinstance(fr, dict):
-            sf   = fr.get("sf")
-            tf   = fr.get("tf")
-            dire = fr.get("dire", fr.get("direction"))
-            con  = fr.get("con",  fr.get("contrast"))
-            rad  = fr.get("radius")
-            if any(v is None for v in (sf, tf, dire, con, rad)):
-                # fall through to tuple scan if dict incomplete
-                pass
-            else:
-                return (sf, tf, dire, con, rad)
-
-        # sequence-like
-        if isinstance(fr, (list, tuple)) and len(fr) >= 2:
-            # Skip flag at fr[0]; collect numeric scalars as candidate params
-            nums = []
-            for v in fr[1:]:
-                # stop once we collected 5 numeric params
-                if len(nums) >= 5:
-                    break
-                # accept int/float; ignore None / arrays / nested lists (likely phase or center)
-                if isinstance(v, (int, float, np.integer, np.floating)):
-                    nums.append(float(v))
-                # if a small 1-element tuple/array sometimes wraps numbers, unwrap
-                elif isinstance(v, (tuple, list)) and len(v) == 1 and isinstance(v[0], (int, float, np.integer, np.floating)):
-                    nums.append(float(v[0]))
-                else:
-                    # non-numeric -> likely phase vector / center / dict; ignore for DGC
-                    continue
-            if len(nums) >= 5:
-                sf, tf, dire, con, rad = nums[:5]
-                return (sf, tf, dire, con, rad)
-
-        return None
-
-    # Map unique index -> condition key (or None)
-    is_display = np.array([_is_display_flag(fr) for fr in fu], dtype=int)
-    cond_key_for_uix = [None] * len(fu)
-    for uix, fr in enumerate(fu):
-        if is_display[uix] == 1:
-            cond_key_for_uix[uix] = _cond_tuple_from_frame(fr)
-
-    cond_stream = np.array([cond_key_for_uix[i] if 0 <= i < len(cond_key_for_uix) else None
-                            for i in idx], dtype=object)
-
-    # Group consecutive frames by condition key (None = gap/blank)
-    prev_cond = np.r_[None, cond_stream[:-1]]
-    next_cond = np.r_[cond_stream[1:], None]
-
-    onset_mask  = [(c is not None) and (pc is None or c != pc) for c, pc in zip(cond_stream, prev_cond)]
-    offset_mask = [(c is not None) and (nc is None or c != nc) for c, nc in zip(cond_stream, next_cond)]
+    # Group consecutive frames by condition id (None means gap)
+    prev_c = np.r_[None, cond_stream[:-1]]
+    next_c = np.r_[cond_stream[1:], None]
+    onset_mask  = [(c is not None) and (pc is None or c != pc) for c, pc in zip(cond_stream, prev_c)]
+    offset_mask = [(c is not None) and (nc is None or c != nc) for c, nc in zip(cond_stream, next_c)]
 
     onset_frames  = np.flatnonzero(onset_mask)
     offset_frames = np.flatnonzero(offset_mask)
     if onset_frames.size == 0:
-        # Debug hint: how many display frames had parsable params?
-        n_disp = int(np.sum([x is not None for x in cond_key_for_uix]))
-        raise ValueError(f"No ON presentations detected after grouping by condition (parsable display states: {n_disp})")
+        raise ValueError("DGC: no ON presentations detected from cond_id stream")
+
+    # Helper to unpack condition params
+    def _parse_cond(c):
+        p = all_conds[c]
+        if isinstance(p, dict):
+            sf   = p.get("sf")
+            tf   = p.get("tf")
+            dire = p.get("dire", p.get("direction"))
+            con  = p.get("con",  p.get("contrast"))
+            rad  = p.get("radius")
+            return sf, tf, dire, con, rad
+        # assume tuple/list order (sf, tf, dire, con, radius)
+        if isinstance(p, (list, tuple)) and len(p) >= 5:
+            return p[0], p[1], p[2], p[3], p[4]
+        return (np.nan, np.nan, np.nan, np.nan, np.nan)
 
     rows = []
     for i, (f_on, f_off) in enumerate(zip(onset_frames, offset_frames), start=1):
-        key = cond_stream[f_on]  # (sf, tf, dire, con, radius)
-        if key is None:
+        c = cond_stream[f_on]
+        # bounds safety
+        if c is None or c < 0 or c >= len(all_conds):
             sf=tf=dire=con=rad=np.nan
         else:
-            sf, tf, dire, con, rad = key
+            sf, tf, dire, con, rad = _parse_cond(int(c))
         rows.append({
             "trial": i,
+            "cond_id": int(c) if c is not None else -1,
             "onset_frame": int(f_on),
             "offset_frame": int(f_off),
             "onset_time_s": float(f_on * dt),
@@ -357,6 +265,7 @@ def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
             df[k] = [v] * len(df)
 
     return df
+
 
 
 
