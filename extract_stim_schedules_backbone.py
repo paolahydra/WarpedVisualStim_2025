@@ -90,108 +90,234 @@ def ensure_identity_cols(df: pd.DataFrame, stim_key: str, stim_class: str) -> pd
 # ---------- YOUR extractors: plug your working code here ----------
 def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
     """
-    Frame-level extractor for DGMC with real onset/offset frames.
+    Trial-level extractor for DriftingGrating(Multiple)Circle:
+    - Groups consecutive ON frames with identical (iteration, sf, tf, direction, contrast, center)
+      into a single trial.
+    - Returns a table with one row per trial, including real onset/offset frame numbers.
+    - Column names match your requested schema exactly.
+
+    Parameters
+    ----------
+    stim_key : str
+        Key/identifier of this stimulus instance.
+    stim_log : dict
+        The class-specific log that includes:
+        - 'frames_unique' (list/tuple of dicts or tuples describing frame states)
+        - 'index_to_display' (per-frame indices into frames_unique)
+        and optionally the global fields listed below.
+    ctx : dict
+        Context dictionary (e.g., may include monitor info). Not required here.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns (in order):
+        ['stim_key','stim_class','trial','iteration','onset_frame','offset_frame',
+         'sf','tf','direction','contrast','radius','center','block_dur','midgap_dur',
+         'pregap_dur','postgap_dur','is_random_start_phase','coordinate','background',
+         'smooth_width_ratio','is_smooth_edge']
     """
     import numpy as np
     import pandas as pd
 
-    # ---- refresh rate ----
-    rr = None
-    mon = ctx.get("monitor") if isinstance(ctx, dict) else None
-    if isinstance(mon, dict):
-        for k in ("refresh_rate","refreshRate","RefreshRate","rr","fps"):
-            if k in mon and mon[k]:
-                rr = float(mon[k]); break
-    if rr is None or rr <= 0:
-        rr = 60.0
-    dt = 1.0 / rr
+    # ---- basic checks ----
+    if not isinstance(stim_log, dict):
+        raise ValueError("stim_log must be a dict")
+    if "frames_unique" not in stim_log or "index_to_display" not in stim_log:
+        raise ValueError("stim_log must contain 'frames_unique' and 'index_to_display'")
 
-    # ---- inputs ----
-    frames_unique = stim_log.get("frames_unique")
-    if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 3:
-        raise ValueError("frames_unique missing or malformed")
+    frames_unique = stim_log["frames_unique"]
     idx = np.asarray(stim_log["index_to_display"], dtype=int)
-
     fu = np.array(frames_unique, dtype=object)
 
-    def _is_disp(fr):
-        try:
-            x = fr[0]
-            return int(x) if x is not None else 0
-        except Exception:
+    # ---- helpers: detect ON entries and extract parameters from a frames_unique entry ----
+    def _is_on_entry(entry):
+        # Minimal assumptions:
+        # 1) If dict and has an explicit flag, use it.
+        if isinstance(entry, dict):
+            for k in ("is_display", "display", "is_on", "on"):
+                if k in entry:
+                    return 1 if entry[k] else 0
+            # Heuristic: if it looks like a param dict (has sf/tf/dir/contrast),
+            # treat as ON; OFF entries typically lack these.
+            for k in ("sf", "tf", "dire", "direction", "con", "contrast"):
+                if k in entry:
+                    return 1
             return 0
+        # 2) If tuple/list, first element often encodes ON(1)/OFF(0).
+        if isinstance(entry, (list, tuple)) and len(entry) > 0:
+            try:
+                return 1 if float(entry[0]) == 1 else 0
+            except Exception:
+                return 0
+        return 0
 
-    is_display = np.array([_is_disp(fr) for fr in fu], dtype=int)
-    on_indices = np.where(is_display == 1)[0]
-    if on_indices.size == 0:
-        raise ValueError("No ON states in frames_unique (is_display==1)")
+    def _as_center_tuple(c):
+        if isinstance(c, (list, tuple)) and len(c) == 2:
+            return (float(c[0]), float(c[1]))
+        return c  # leave as-is if malformed; equality will then be exact
 
-    # ON/OFF runs
-    is_on = np.isin(idx, on_indices)
-    onset_mask  = is_on & np.r_[True, idx[1:] != idx[:-1]]
-    offset_mask = is_on & np.r_[idx[:-1] != idx[1:], True]
-    onset_frames  = np.flatnonzero(onset_mask)
-    offset_frames = np.flatnonzero(offset_mask)
-    if onset_frames.size == 0:
-        raise ValueError("No ON transitions detected")
-    onset_idx_vals = idx[onset_frames]
-
-    # Condition id mapping
-    n_cond = (len(frames_unique) - 1) // 2
-
-    def _params_from_on_frame(fr):
+    def _params_from_entry(entry):
         """
-        Extract (sf, tf, dire, con, radius, center) from ON-frame entry.
+        Return (sf, tf, direction, contrast, radius, center).
+        Keep names consistent and leave values as-is when missing (np.nan or None).
         """
-        if isinstance(fr, dict):
-            sf   = fr.get("sf")
-            tf   = fr.get("tf")
-            dire = fr.get("dire", fr.get("direction"))
-            con  = fr.get("con",  fr.get("contrast"))
-            rad  = fr.get("radius")
-            cen  = fr.get("center", fr.get("centre"))
-            if isinstance(cen, list):
-                cen = tuple(cen)
-            return sf, tf, dire, con, rad, cen
-        if isinstance(fr, (list, tuple)):
+        sf = tf = direction = contrast = radius = center = np.nan
+        if isinstance(entry, dict):
+            # Flexible key mapping
+            sf = entry.get("sf", sf)
+            tf = entry.get("tf", tf)
+            direction = entry.get("direction", entry.get("dire", direction))
+            contrast = entry.get("contrast", entry.get("con", contrast))
+            radius = entry.get("radius", radius)
+            center = entry.get("center", entry.get("centre", center))
+        elif isinstance(entry, (list, tuple)):
             # Common layout: [flag, sf, tf, dire, con, radius, center, ...]
-            if len(fr) >= 7:
-                cen = fr[6]
-                if isinstance(cen, list):
-                    cen = tuple(cen)
-                return fr[1], fr[2], fr[3], fr[4], fr[5], cen
-        return (np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
+            if len(entry) >= 7:
+                sf = entry[1]
+                tf = entry[2]
+                direction = entry[3]
+                contrast = entry[4]
+                radius = entry[5]
+                center = entry[6]
+        center = _as_center_tuple(center)
+        return sf, tf, direction, contrast, radius, center
 
-    cond_ids = ((onset_idx_vals - 1) // 2).astype(int)
-    rows = []
-    for i, (f_on, f_off, cid) in enumerate(zip(onset_frames, offset_frames, cond_ids), start=1):
-        if 0 <= cid < n_cond:
-            on_fr = frames_unique[2 * cid + 1]
-        else:
-            on_fr = None
-        sf, tf, dire, con, rad, cen = _params_from_on_frame(on_fr) if on_fr is not None else (np.nan,)*6
-        rows.append({
-            "trial": i,
-            "onset_frame": int(f_on),
-            "offset_frame": int(f_off),
-            "onset_time_s": float(f_on * dt),
-            "offset_time_s": float((f_off + 1) * dt),
-            "sf": sf, "tf": tf, "dire": dire, "con": con, "radius": rad, "center": cen,
+    # Build a mask telling whether a frames_unique entry is ON
+    is_on_entry = np.array([_is_on_entry(x) for x in fu], dtype=bool)
+
+    # ---- per-frame pass: keep only ON frames and attach their params ----
+    # iteration: if present in stim_log and scalar, use it; else default to 1
+    iteration_global = stim_log.get("iteration", 1)
+    try:
+        iteration_global = int(iteration_global)
+    except Exception:
+        # if it's not a scalar int (e.g., list), just keep it as-is and replicate later
+        pass
+
+    per_frame = []
+    for fnum, uix in enumerate(idx):
+        # bounds & sanity
+        if not (0 <= uix < fu.shape[0]):
+            continue
+        if not is_on_entry[uix]:
+            continue  # skip OFF frames
+
+        entry = fu[uix]
+        sf, tf, direction, contrast, radius, center = _params_from_entry(entry)
+
+        # Prefer a per-entry iteration if present; otherwise, use global (scalar)
+        iter_here = iteration_global
+        if isinstance(entry, dict) and "iteration" in entry:
+            try:
+                iter_here = int(entry["iteration"])
+            except Exception:
+                iter_here = entry["iteration"]
+
+        per_frame.append({
+            "frame": int(fnum),
+            "iteration": iter_here,
+            "sf": sf, "tf": tf, "direction": direction, "contrast": contrast,
+            "radius": radius, "center": center,
         })
+
+    if not per_frame:
+        raise ValueError("No ON frames detected in index_to_display mapping.")
+
+    # ---- collapse consecutive frames with identical (iteration, sf, tf, direction, contrast, center) ----
+    rows = []
+    def _trial_key(d):
+        return (d["iteration"], d["sf"], d["tf"], d["direction"], d["contrast"], d["center"])
+
+    start = 0
+    trial = 0
+    while start < len(per_frame):
+        trial += 1
+        k = _trial_key(per_frame[start])
+        onset_frame = per_frame[start]["frame"]
+        end = start
+        while end + 1 < len(per_frame) and _trial_key(per_frame[end + 1]) == k and per_frame[end + 1]["frame"] == per_frame[end]["frame"] + 1:
+            end += 1
+        offset_frame = per_frame[end]["frame"]
+
+        d0 = per_frame[start]
+        # Build row for this trial
+        rows.append({
+            "trial": trial,
+            "iteration": d0["iteration"],
+            "onset_frame": onset_frame,
+            "offset_frame": offset_frame,
+            "sf": d0["sf"],
+            "tf": d0["tf"],
+            "direction": d0["direction"],
+            "contrast": d0["contrast"],
+            "radius": d0["radius"],
+            "center": d0["center"],
+        })
+        start = end + 1
 
     df = pd.DataFrame(rows)
 
-    # Attach globals per row
-    for k in ("block_dur","midgap_dur","iteration","is_blank_block",
-              "coordinate","background","center_list",
-              "is_random_start_phase","is_smooth_edge","smooth_width_ratio"):
-        if k in stim_log and k not in df.columns:
-            v = stim_log[k]
+    # ---- attach fixed/global fields and standardize output columns ----
+    stim_class = stim_log.get("stim_name", "DriftingGratingMultipleCircle")
+
+    # Map of optional globals to include (replicated per row)
+    globals_map = {
+        "block_dur":            stim_log.get("block_dur", np.nan),
+        "midgap_dur":           stim_log.get("midgap_dur", np.nan),
+        "pregap_dur":           stim_log.get("pregap_dur", np.nan),
+        "postgap_dur":          stim_log.get("postgap_dur", np.nan),
+        "is_random_start_phase":stim_log.get("is_random_start_phase", False),
+        "coordinate":           stim_log.get("coordinate", None),
+        "background":           stim_log.get("background", np.nan),
+        "smooth_width_ratio":   stim_log.get("smooth_width_ratio", np.nan),
+        "is_smooth_edge":       stim_log.get("is_smooth_edge", False),
+    }
+
+    # Add leading metadata
+    df.insert(0, "stim_class", stim_class)
+    df.insert(0, "stim_key", stim_key)
+
+    # Add/replicate globals
+    for k, v in globals_map.items():
+        # Ensure 'center' is not overwritten; only add globals in the requested list
+        if k not in df.columns:
+            # Convert lists to tuples for immutability/consistency
             if isinstance(v, list):
                 v = tuple(v)
             df[k] = [v] * len(df)
 
+    # ---- reorder & ensure all requested columns exist ----
+    requested_order = [
+        "stim_key",
+        "stim_class",
+        "trial",
+        "iteration",
+        "onset_frame",
+        "offset_frame",
+        "sf",
+        "tf",
+        "direction",
+        "contrast",
+        "radius",
+        "center",
+        "block_dur",
+        "midgap_dur",
+        "pregap_dur",
+        "postgap_dur",
+        "is_random_start_phase",
+        "coordinate",
+        "background",
+        "smooth_width_ratio",
+        "is_smooth_edge",
+    ]
+    for col in requested_order:
+        if col not in df.columns:
+            df[col] = np.nan  # fill any truly missing field to keep schema consistent
+    df = df[requested_order]
+
     return df
+
 
 
 
