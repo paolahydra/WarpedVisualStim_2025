@@ -88,30 +88,15 @@ def ensure_identity_cols(df: pd.DataFrame, stim_key: str, stim_class: str) -> pd
     return df
 
 # ---------- YOUR extractors: plug your working code here ----------
-def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
+def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx=None):
     """
-    Trial-level extractor for DriftingGrating(Multiple)Circle:
-    - Groups consecutive ON frames with identical (iteration, sf, tf, direction, contrast, center)
-      into a single trial.
-    - Returns a table with one row per trial, including real onset/offset frame numbers.
-    - Column names match your requested schema exactly.
+    Trial-level extractor for DriftingGrating(Multiple)Circle.
 
-    Parameters
-    ----------
-    stim_key : str
-        Key/identifier of this stimulus instance.
-    stim_log : dict
-        The class-specific log that includes:
-        - 'frames_unique' (list/tuple of dicts or tuples describing frame states)
-        - 'index_to_display' (per-frame indices into frames_unique)
-        and optionally the global fields listed below.
-    ctx : dict
-        Context dictionary (e.g., may include monitor info). Not required here.
+    Collapses consecutive ON frames that share the same
+    (iteration, sf, tf, direction, contrast, center) into one trial and
+    returns a DataFrame with one row per trial, including real onset/offset frames.
 
-    Returns
-    -------
-    pandas.DataFrame
-        Columns (in order):
+    Output columns (exact order):
         ['stim_key','stim_class','trial','iteration','onset_frame','offset_frame',
          'sf','tf','direction','contrast','radius','center','block_dur','midgap_dur',
          'pregap_dur','postgap_dur','is_random_start_phase','coordinate','background',
@@ -130,12 +115,12 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
     idx = np.asarray(stim_log["index_to_display"], dtype=int)
     fu = np.array(frames_unique, dtype=object)
 
-    # ---- helpers: detect ON entries and extract parameters from a frames_unique entry ----
+    # ---- helpers ----
     def _is_seq(x):
         return isinstance(x, (list, tuple, np.ndarray))
 
     def _is_on_entry(entry):
-        # dict case (unchanged)
+        # Dict: explicit flags or presence of typical params
         if isinstance(entry, dict):
             for k in ("is_display", "display", "is_on", "on"):
                 if k in entry:
@@ -144,13 +129,10 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
                 if k in entry:
                     return True
             return False
-        # NEW: accept numpy arrays in addition to list/tuple
+        # Tuple/list/ndarray: first element encodes ON==1 in these logs
         if _is_seq(entry) and len(entry) > 0:
-            e0 = entry[0]
             try:
-                # In your DG logs, ON frames look like:
-                # (1, 1, sf, tf, direction, contrast, radius, center, phase, ...)
-                return float(e0) == 1.0
+                return float(entry[0]) == 1.0
             except Exception:
                 return False
         return False
@@ -177,55 +159,38 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
             e = entry.tolist() if isinstance(entry, np.ndarray) else entry
             # Your DG arrays are length ≥ 10: (1, 1, sf, tf, dir, con, radius, center, phase, ...)
             if len(e) >= 8 and float(e[0]) == 1.0:
-                sf        = e[2]
-                tf        = e[3]
-                direction = e[4]
-                contrast  = e[5]
-                radius    = e[6]
-                center    = e[7]
+                sf, tf, direction, contrast, radius, center = e[2], e[3], e[4], e[5], e[6], e[7]
             elif len(e) >= 7:
-                # fallback layout: [flag, sf, tf, dir, con, radius, center, ...]
-                sf        = e[1]
-                tf        = e[2]
-                direction = e[3]
-                contrast  = e[4]
-                radius    = e[5]
-                center    = e[6]
+                # Fallback layout: [flag, sf, tf, dir, con, radius, center, ...]
+                sf, tf, direction, contrast, radius, center = e[1], e[2], e[3], e[4], e[5], e[6]
         center = _as_center_tuple(center)
         return sf, tf, direction, contrast, radius, center
 
-
-    # Build a mask telling whether a frames_unique entry is ON
+    # ON detection table
     is_on_entry = np.array([_is_on_entry(x) for x in fu], dtype=bool)
 
-    # ---- per-frame pass: keep only ON frames and attach their params ----
-    # iteration: if present in stim_log and scalar, use it; else default to 1
+    # iteration (global default; per-entry override if present)
     iteration_global = stim_log.get("iteration", 1)
     try:
         iteration_global = int(iteration_global)
     except Exception:
-        # if it's not a scalar int (e.g., list), just keep it as-is and replicate later
         pass
 
+    # ---- per-frame pass restricted to ON frames ----
     per_frame = []
     for fnum, uix in enumerate(idx):
-        # bounds & sanity
         if not (0 <= uix < fu.shape[0]):
             continue
         if not is_on_entry[uix]:
-            continue  # skip OFF frames
-
+            continue
         entry = fu[uix]
         sf, tf, direction, contrast, radius, center = _params_from_entry(entry)
-
-        # Prefer a per-entry iteration if present; otherwise, use global (scalar)
         iter_here = iteration_global
         if isinstance(entry, dict) and "iteration" in entry:
             try:
                 iter_here = int(entry["iteration"])
             except Exception:
                 iter_here = entry["iteration"]
-
         per_frame.append({
             "frame": int(fnum),
             "iteration": iter_here,
@@ -236,11 +201,11 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
     if not per_frame:
         raise ValueError("No ON frames detected in index_to_display mapping.")
 
-    # ---- collapse consecutive frames with identical (iteration, sf, tf, direction, contrast, center) ----
-    rows = []
+    # ---- collapse consecutive frames with identical key ----
     def _trial_key(d):
         return (d["iteration"], d["sf"], d["tf"], d["direction"], d["contrast"], d["center"])
 
+    rows = []
     start = 0
     trial = 0
     while start < len(per_frame):
@@ -248,12 +213,13 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
         k = _trial_key(per_frame[start])
         onset_frame = per_frame[start]["frame"]
         end = start
-        while end + 1 < len(per_frame) and _trial_key(per_frame[end + 1]) == k and per_frame[end + 1]["frame"] == per_frame[end]["frame"] + 1:
+        # consecutive frames with identical key and contiguous frame numbers
+        while (end + 1 < len(per_frame)
+               and _trial_key(per_frame[end + 1]) == k
+               and per_frame[end + 1]["frame"] == per_frame[end]["frame"] + 1):
             end += 1
         offset_frame = per_frame[end]["frame"]
-
         d0 = per_frame[start]
-        # Build row for this trial
         rows.append({
             "trial": trial,
             "iteration": d0["iteration"],
@@ -270,36 +236,28 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
 
     df = pd.DataFrame(rows)
 
-    # ---- attach fixed/global fields and standardize output columns ----
+    # ---- attach globals and standardize columns ----
     stim_class = stim_log.get("stim_name", "DriftingGratingMultipleCircle")
-
-    # Map of optional globals to include (replicated per row)
-    globals_map = {
-        "block_dur":            stim_log.get("block_dur", np.nan),
-        "midgap_dur":           stim_log.get("midgap_dur", np.nan),
-        "pregap_dur":           stim_log.get("pregap_dur", np.nan),
-        "postgap_dur":          stim_log.get("postgap_dur", np.nan),
-        "is_random_start_phase":stim_log.get("is_random_start_phase", False),
-        "coordinate":           stim_log.get("coordinate", None),
-        "background":           stim_log.get("background", np.nan),
-        "smooth_width_ratio":   stim_log.get("smooth_width_ratio", np.nan),
-        "is_smooth_edge":       stim_log.get("is_smooth_edge", False),
-    }
-
-    # Add leading metadata
     df.insert(0, "stim_class", stim_class)
     df.insert(0, "stim_key", stim_key)
 
-    # Add/replicate globals
+    globals_map = {
+        "block_dur":             stim_log.get("block_dur", np.nan),
+        "midgap_dur":            stim_log.get("midgap_dur", np.nan),
+        "pregap_dur":            stim_log.get("pregap_dur", np.nan),
+        "postgap_dur":           stim_log.get("postgap_dur", np.nan),
+        "is_random_start_phase": stim_log.get("is_random_start_phase", False),
+        "coordinate":            stim_log.get("coordinate", None),
+        "background":            stim_log.get("background", np.nan),
+        "smooth_width_ratio":    stim_log.get("smooth_width_ratio", np.nan),
+        "is_smooth_edge":        stim_log.get("is_smooth_edge", False),
+    }
     for k, v in globals_map.items():
-        # Ensure 'center' is not overwritten; only add globals in the requested list
+        if isinstance(v, list):
+            v = tuple(v)
         if k not in df.columns:
-            # Convert lists to tuples for immutability/consistency
-            if isinstance(v, list):
-                v = tuple(v)
             df[k] = [v] * len(df)
 
-    # ---- reorder & ensure all requested columns exist ----
     requested_order = [
         "stim_key",
         "stim_class",
@@ -325,10 +283,9 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
     ]
     for col in requested_order:
         if col not in df.columns:
-            df[col] = np.nan  # fill any truly missing field to keep schema consistent
-    df = df[requested_order]
+            df[col] = np.nan
+    return df[requested_order]
 
-    return df
 
 
 
