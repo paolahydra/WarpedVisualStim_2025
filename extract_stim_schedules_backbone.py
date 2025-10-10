@@ -90,12 +90,13 @@ def ensure_identity_cols(df: pd.DataFrame, stim_key: str, stim_class: str) -> pd
 # ---------- YOUR extractors: plug your working code here ----------
 def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
     """
-    Frame-level extractor for DGMC with real onset/offset frames.
+    Real per-presentation onsets/offsets for DGMC.
+    Groups consecutive frames that share the same condition (sf, tf, dire, con, radius, center).
     """
     import numpy as np
     import pandas as pd
 
-    # ---- refresh rate ----
+    # refresh rate
     rr = None
     mon = ctx.get("monitor") if isinstance(ctx, dict) else None
     if isinstance(mon, dict):
@@ -106,9 +107,9 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
         rr = 60.0
     dt = 1.0 / rr
 
-    # ---- inputs ----
+    # inputs
     frames_unique = stim_log.get("frames_unique")
-    if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 3:
+    if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 1:
         raise ValueError("frames_unique missing or malformed")
     idx = np.asarray(stim_log["index_to_display"], dtype=int)
 
@@ -121,27 +122,10 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
         except Exception:
             return 0
 
-    is_display = np.array([_is_disp(fr) for fr in fu], dtype=int)
-    on_indices = np.where(is_display == 1)[0]
-    if on_indices.size == 0:
-        raise ValueError("No ON states in frames_unique (is_display==1)")
-
-    # ON/OFF runs
-    is_on = np.isin(idx, on_indices)
-    onset_mask  = is_on & np.r_[True, idx[1:] != idx[:-1]]
-    offset_mask = is_on & np.r_[idx[:-1] != idx[1:], True]
-    onset_frames  = np.flatnonzero(onset_mask)
-    offset_frames = np.flatnonzero(offset_mask)
-    if onset_frames.size == 0:
-        raise ValueError("No ON transitions detected")
-    onset_idx_vals = idx[onset_frames]
-
-    # Condition id mapping
-    n_cond = (len(frames_unique) - 1) // 2
-
-    def _params_from_on_frame(fr):
+    def _cond_tuple_from_on_frame(fr):
         """
-        Extract (sf, tf, dire, con, radius, center) from ON-frame entry.
+        Extract condition key (sf, tf, dire, con, radius, center) from ON frame.
+        Center is normalized to a tuple if list-like.
         """
         if isinstance(fr, dict):
             sf   = fr.get("sf")
@@ -152,24 +136,44 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
             cen  = fr.get("center", fr.get("centre"))
             if isinstance(cen, list):
                 cen = tuple(cen)
-            return sf, tf, dire, con, rad, cen
+            return (sf, tf, dire, con, rad, cen)
         if isinstance(fr, (list, tuple)):
-            # Common layout: [flag, sf, tf, dire, con, radius, center, ...]
+            # Common: [flag, sf, tf, dire, con, radius, center, (phase...), ...]
             if len(fr) >= 7:
                 cen = fr[6]
                 if isinstance(cen, list):
                     cen = tuple(cen)
-                return fr[1], fr[2], fr[3], fr[4], fr[5], cen
-        return (np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
+                return (fr[1], fr[2], fr[3], fr[4], fr[5], cen)
+        return None
 
-    cond_ids = ((onset_idx_vals - 1) // 2).astype(int)
+    # Map unique index -> condition key (or None)
+    is_display = np.array([_is_disp(fr) for fr in fu], dtype=int)
+    cond_key_for_uix = [None] * len(fu)
+    for uix, fr in enumerate(fu):
+        if is_display[uix] == 1:
+            cond_key_for_uix[uix] = _cond_tuple_from_on_frame(fr)
+
+    cond_stream = np.array([cond_key_for_uix[i] if 0 <= i < len(cond_key_for_uix) else None
+                            for i in idx], dtype=object)
+
+    prev_cond = np.r_[None, cond_stream[:-1]]
+    next_cond = np.r_[cond_stream[1:], None]
+
+    onset_mask  = [(c is not None) and (pc is None or c != pc) for c, pc in zip(cond_stream, prev_cond)]
+    offset_mask = [(c is not None) and (nc is None or c != nc) for c, nc in zip(cond_stream, next_cond)]
+
+    onset_frames  = np.flatnonzero(onset_mask)
+    offset_frames = np.flatnonzero(offset_mask)
+    if onset_frames.size == 0:
+        raise ValueError("No ON presentations detected after grouping by condition.")
+
     rows = []
-    for i, (f_on, f_off, cid) in enumerate(zip(onset_frames, offset_frames, cond_ids), start=1):
-        if 0 <= cid < n_cond:
-            on_fr = frames_unique[2 * cid + 1]
+    for i, (f_on, f_off) in enumerate(zip(onset_frames, offset_frames), start=1):
+        key = cond_stream[f_on]  # (sf, tf, dire, con, radius, center)
+        if key is None:
+            sf=tf=dire=con=rad=cen=np.nan
         else:
-            on_fr = None
-        sf, tf, dire, con, rad, cen = _params_from_on_frame(on_fr) if on_fr is not None else (np.nan,)*6
+            sf, tf, dire, con, rad, cen = key
         rows.append({
             "trial": i,
             "onset_frame": int(f_on),
@@ -177,11 +181,12 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
             "onset_time_s": float(f_on * dt),
             "offset_time_s": float((f_off + 1) * dt),
             "sf": sf, "tf": tf, "dire": dire, "con": con, "radius": rad, "center": cen,
+            "measured_frames": int(f_off - f_on + 1),
         })
 
     df = pd.DataFrame(rows)
 
-    # Attach globals per row
+    # attach globals
     for k in ("block_dur","midgap_dur","iteration","is_blank_block",
               "coordinate","background","center_list",
               "is_random_start_phase","is_smooth_edge","smooth_width_ratio"):
@@ -196,14 +201,16 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
 
 
 
+
 def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
     """
-    Frame-level extractor for DriftingGratingCircle with real onset/offset frames.
+    Real per-presentation onsets/offsets for DriftingGratingCircle.
+    Groups consecutive frames that share the same condition (ignores per-frame phase).
     """
     import numpy as np
     import pandas as pd
 
-    # ---- refresh rate ----
+    # refresh rate
     rr = None
     mon = ctx.get("monitor") if isinstance(ctx, dict) else None
     if isinstance(mon, dict):
@@ -214,15 +221,14 @@ def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
         rr = 60.0
     dt = 1.0 / rr
 
-    # ---- inputs ----
+    # inputs
     frames_unique = stim_log.get("frames_unique")
-    if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 3:
+    if not isinstance(frames_unique, (list, tuple)) or len(frames_unique) < 1:
         raise ValueError("frames_unique missing or malformed")
     idx = np.asarray(stim_log["index_to_display"], dtype=int)
 
     fu = np.array(frames_unique, dtype=object)
 
-    # Robust is_display extraction (treat None as 0)
     def _is_disp(fr):
         try:
             x = fr[0]
@@ -230,28 +236,10 @@ def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
         except Exception:
             return 0
 
-    is_display = np.array([_is_disp(fr) for fr in fu], dtype=int)
-    on_indices = np.where(is_display == 1)[0]
-    if on_indices.size == 0:
-        raise ValueError("No ON states in frames_unique (is_display==1)")
-
-    # ON/OFF runs
-    is_on = np.isin(idx, on_indices)
-    onset_mask  = is_on & np.r_[True, idx[1:] != idx[:-1]]
-    offset_mask = is_on & np.r_[idx[:-1] != idx[1:], True]
-    onset_frames  = np.flatnonzero(onset_mask)
-    offset_frames = np.flatnonzero(offset_mask)
-    if onset_frames.size == 0:
-        raise ValueError("No ON transitions detected")
-    onset_idx_vals = idx[onset_frames]
-
-    # Condition id from ON index: ON=2*c+1 → c=(i-1)//2
-    n_cond = (len(frames_unique) - 1) // 2
-
-    def _params_from_on_frame(fr):
+    def _cond_tuple_from_on_frame(fr):
         """
-        Accepts the ON-frame entry and extracts (sf, tf, dire, con, radius).
-        Works for list/tuple or dict payloads.
+        Extract a condition key (sf, tf, dire, con, radius) from an ON frame entry,
+        ignoring frame phase. Works with list/tuple or dict payloads.
         """
         if isinstance(fr, dict):
             sf   = fr.get("sf")
@@ -259,29 +247,54 @@ def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
             dire = fr.get("dire", fr.get("direction"))
             con  = fr.get("con",  fr.get("contrast"))
             rad  = fr.get("radius")
-            return sf, tf, dire, con, rad
+            return (sf, tf, dire, con, rad)
         if isinstance(fr, (list, tuple)):
-            # Common layout: [flag, sf, tf, dire, con, radius, ...]
+            # Common: [flag, sf, tf, dire, con, radius, (maybe phase...), ...]
+            # Be defensive about length
             if len(fr) >= 6:
-                return fr[1], fr[2], fr[3], fr[4], fr[5]
-        # Fallback: fill NaNs
-        return (np.nan, np.nan, np.nan, np.nan, np.nan)
+                return (fr[1], fr[2], fr[3], fr[4], fr[5])
+        return None  # unknown layout → will be treated as no-condition
 
-    cond_ids = ((onset_idx_vals - 1) // 2).astype(int)
+    # Build map: unique index -> condition tuple (or None for GAP/blank)
+    is_display = np.array([_is_disp(fr) for fr in fu], dtype=int)
+    cond_key_for_uix = [None] * len(fu)
+    for uix, fr in enumerate(fu):
+        if is_display[uix] == 1:
+            cond_key_for_uix[uix] = _cond_tuple_from_on_frame(fr)  # may still be None if layout odd
+
+    # Turn the frame-index stream into condition-key stream
+    cond_stream = np.array([cond_key_for_uix[i] if 0 <= i < len(cond_key_for_uix) else None
+                            for i in idx], dtype=object)
+
+    # Find run onsets/offsets based on condition-key changes
+    prev_cond = np.r_[None, cond_stream[:-1]]
+    next_cond = np.r_[cond_stream[1:], None]
+
+    onset_mask  = [(c is not None) and (pc is None or c != pc) for c, pc in zip(cond_stream, prev_cond)]
+    offset_mask = [(c is not None) and (nc is None or c != nc) for c, nc in zip(cond_stream, next_cond)]
+
+    onset_frames  = np.flatnonzero(onset_mask)
+    offset_frames = np.flatnonzero(offset_mask)
+    if onset_frames.size == 0:
+        raise ValueError("No ON presentations detected after grouping by condition.")
+
+    # Build rows with parameters from the condition key
     rows = []
-    for i, (f_on, f_off, cid) in enumerate(zip(onset_frames, offset_frames, cond_ids), start=1):
-        if 0 <= cid < n_cond:
-            on_fr = frames_unique[2 * cid + 1]
+    for i, (f_on, f_off) in enumerate(zip(onset_frames, offset_frames), start=1):
+        key = cond_stream[f_on]  # tuple (sf, tf, dire, con, radius)
+        if key is None:
+            # Shouldn't happen given onset_mask definition, but be safe
+            sf=tf=dire=con=rad=np.nan
         else:
-            on_fr = None
-        sf, tf, dire, con, rad = _params_from_on_frame(on_fr) if on_fr is not None else (np.nan,)*5
+            sf, tf, dire, con, rad = key
         rows.append({
             "trial": i,
             "onset_frame": int(f_on),
             "offset_frame": int(f_off),
             "onset_time_s": float(f_on * dt),
-            "offset_time_s": float((f_off + 1) * dt),
+            "offset_time_s": float((f_off + 1) * dt),  # end boundary after last frame
             "sf": sf, "tf": tf, "dire": dire, "con": con, "radius": rad,
+            "measured_frames": int(f_off - f_on + 1),
         })
 
     df = pd.DataFrame(rows)
@@ -297,6 +310,7 @@ def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
             df[k] = [v] * len(df)
 
     return df
+
 
 
 
