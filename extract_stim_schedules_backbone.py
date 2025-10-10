@@ -91,7 +91,8 @@ def ensure_identity_cols(df: pd.DataFrame, stim_key: str, stim_class: str) -> pd
 def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
     """
     Real per-presentation onsets/offsets for DGMC.
-    Groups consecutive frames that share the same condition (sf, tf, dire, con, radius, center).
+    Groups consecutive frames that share the same condition (sf, tf, dire, con, radius, center),
+    ignoring per-frame phase. Robust to varied frames_unique layouts.
     """
     import numpy as np
     import pandas as pd
@@ -115,18 +116,21 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
 
     fu = np.array(frames_unique, dtype=object)
 
-    def _is_disp(fr):
+    def _is_display_flag(fr):
         try:
             x = fr[0]
-            return int(x) if x is not None else 0
+            return int(bool(x))
         except Exception:
             return 0
 
-    def _cond_tuple_from_on_frame(fr):
+    def _cond_tuple_from_frame(fr):
         """
-        Extract condition key (sf, tf, dire, con, radius, center) from ON frame.
-        Center is normalized to a tuple if list-like.
+        Extract condition key (sf, tf, dire, con, radius, center) from a display frame.
+        - For dicts, read by keys.
+        - For tuples, harvest first 5 numeric params after flag (sf..radius),
+          and the first 2-number sequence as center if present.
         """
+        # dict-like
         if isinstance(fr, dict):
             sf   = fr.get("sf")
             tf   = fr.get("tf")
@@ -136,22 +140,39 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
             cen  = fr.get("center", fr.get("centre"))
             if isinstance(cen, list):
                 cen = tuple(cen)
-            return (sf, tf, dire, con, rad, cen)
-        if isinstance(fr, (list, tuple)):
-            # Common: [flag, sf, tf, dire, con, radius, center, (phase...), ...]
-            if len(fr) >= 7:
-                cen = fr[6]
-                if isinstance(cen, list):
-                    cen = tuple(cen)
-                return (fr[1], fr[2], fr[3], fr[4], fr[5], cen)
+            if any(v is None for v in (sf, tf, dire, con, rad)) or cen is None:
+                pass
+            else:
+                return (sf, tf, dire, con, rad, cen)
+
+        # sequence-like
+        if isinstance(fr, (list, tuple)) and len(fr) >= 2:
+            nums = []
+            center = None
+            for v in fr[1:]:
+                if isinstance(v, (int, float, np.integer, np.floating)):
+                    if len(nums) < 5:
+                        nums.append(float(v))
+                elif isinstance(v, (tuple, list)) and len(v) == 1 and isinstance(v[0], (int, float, np.integer, np.floating)):
+                    if len(nums) < 5:
+                        nums.append(float(v[0]))
+                elif isinstance(v, (tuple, list)) and center is None and len(v) in (2, 3) and all(isinstance(x, (int, float, np.integer, np.floating)) for x in v):
+                    center = tuple(float(x) for x in v[:2])  # keep 2D
+                # else: ignore (phase vectors etc.)
+                if len(nums) >= 5 and center is not None:
+                    break
+            if len(nums) >= 5 and center is not None:
+                sf, tf, dire, con, rad = nums[:5]
+                return (sf, tf, dire, con, rad, center)
+
         return None
 
     # Map unique index -> condition key (or None)
-    is_display = np.array([_is_disp(fr) for fr in fu], dtype=int)
+    is_display = np.array([_is_display_flag(fr) for fr in fu], dtype=int)
     cond_key_for_uix = [None] * len(fu)
     for uix, fr in enumerate(fu):
         if is_display[uix] == 1:
-            cond_key_for_uix[uix] = _cond_tuple_from_on_frame(fr)
+            cond_key_for_uix[uix] = _cond_tuple_from_frame(fr)
 
     cond_stream = np.array([cond_key_for_uix[i] if 0 <= i < len(cond_key_for_uix) else None
                             for i in idx], dtype=object)
@@ -165,13 +186,14 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
     onset_frames  = np.flatnonzero(onset_mask)
     offset_frames = np.flatnonzero(offset_mask)
     if onset_frames.size == 0:
-        raise ValueError("No ON presentations detected after grouping by condition.")
+        n_disp = int(np.sum([x is not None for x in cond_key_for_uix]))
+        raise ValueError(f"No ON presentations detected after grouping by condition (parsable display states: {n_disp})")
 
     rows = []
     for i, (f_on, f_off) in enumerate(zip(onset_frames, offset_frames), start=1):
         key = cond_stream[f_on]  # (sf, tf, dire, con, radius, center)
         if key is None:
-            sf=tf=dire=con=rad=cen=np.nan
+            sf=tf=dire=con=rad=np.nan; cen=(np.nan, np.nan)
         else:
             sf, tf, dire, con, rad, cen = key
         rows.append({
@@ -202,10 +224,12 @@ def extract_DriftingGratingMultipleCircle(stim_key, stim_log, ctx):
 
 
 
+
 def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
     """
     Real per-presentation onsets/offsets for DriftingGratingCircle.
-    Groups consecutive frames that share the same condition (ignores per-frame phase).
+    Groups consecutive frames that share the same condition (sf, tf, dire, con, radius),
+    ignoring per-frame phase. Robust to varied frames_unique layouts.
     """
     import numpy as np
     import pandas as pd
@@ -229,44 +253,67 @@ def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
 
     fu = np.array(frames_unique, dtype=object)
 
-    def _is_disp(fr):
+    def _is_display_flag(fr):
+        # Treat any truthy/nonzero as display; handle None safely
         try:
             x = fr[0]
-            return int(x) if x is not None else 0
+            return int(bool(x))
         except Exception:
             return 0
 
-    def _cond_tuple_from_on_frame(fr):
+    def _cond_tuple_from_frame(fr):
         """
-        Extract a condition key (sf, tf, dire, con, radius) from an ON frame entry,
-        ignoring frame phase. Works with list/tuple or dict payloads.
+        Extract a stable condition key (sf, tf, dire, con, radius) from a display frame.
+        Works for dicts or heterogeneous tuples; ignores phase and other per-frame info.
+        Returns None if cannot parse.
         """
+        # dict-like
         if isinstance(fr, dict):
             sf   = fr.get("sf")
             tf   = fr.get("tf")
             dire = fr.get("dire", fr.get("direction"))
             con  = fr.get("con",  fr.get("contrast"))
             rad  = fr.get("radius")
-            return (sf, tf, dire, con, rad)
-        if isinstance(fr, (list, tuple)):
-            # Common: [flag, sf, tf, dire, con, radius, (maybe phase...), ...]
-            # Be defensive about length
-            if len(fr) >= 6:
-                return (fr[1], fr[2], fr[3], fr[4], fr[5])
-        return None  # unknown layout → will be treated as no-condition
+            if any(v is None for v in (sf, tf, dire, con, rad)):
+                # fall through to tuple scan if dict incomplete
+                pass
+            else:
+                return (sf, tf, dire, con, rad)
 
-    # Build map: unique index -> condition tuple (or None for GAP/blank)
-    is_display = np.array([_is_disp(fr) for fr in fu], dtype=int)
+        # sequence-like
+        if isinstance(fr, (list, tuple)) and len(fr) >= 2:
+            # Skip flag at fr[0]; collect numeric scalars as candidate params
+            nums = []
+            for v in fr[1:]:
+                # stop once we collected 5 numeric params
+                if len(nums) >= 5:
+                    break
+                # accept int/float; ignore None / arrays / nested lists (likely phase or center)
+                if isinstance(v, (int, float, np.integer, np.floating)):
+                    nums.append(float(v))
+                # if a small 1-element tuple/array sometimes wraps numbers, unwrap
+                elif isinstance(v, (tuple, list)) and len(v) == 1 and isinstance(v[0], (int, float, np.integer, np.floating)):
+                    nums.append(float(v[0]))
+                else:
+                    # non-numeric -> likely phase vector / center / dict; ignore for DGC
+                    continue
+            if len(nums) >= 5:
+                sf, tf, dire, con, rad = nums[:5]
+                return (sf, tf, dire, con, rad)
+
+        return None
+
+    # Map unique index -> condition key (or None)
+    is_display = np.array([_is_display_flag(fr) for fr in fu], dtype=int)
     cond_key_for_uix = [None] * len(fu)
     for uix, fr in enumerate(fu):
         if is_display[uix] == 1:
-            cond_key_for_uix[uix] = _cond_tuple_from_on_frame(fr)  # may still be None if layout odd
+            cond_key_for_uix[uix] = _cond_tuple_from_frame(fr)
 
-    # Turn the frame-index stream into condition-key stream
     cond_stream = np.array([cond_key_for_uix[i] if 0 <= i < len(cond_key_for_uix) else None
                             for i in idx], dtype=object)
 
-    # Find run onsets/offsets based on condition-key changes
+    # Group consecutive frames by condition key (None = gap/blank)
     prev_cond = np.r_[None, cond_stream[:-1]]
     next_cond = np.r_[cond_stream[1:], None]
 
@@ -276,14 +323,14 @@ def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
     onset_frames  = np.flatnonzero(onset_mask)
     offset_frames = np.flatnonzero(offset_mask)
     if onset_frames.size == 0:
-        raise ValueError("No ON presentations detected after grouping by condition.")
+        # Debug hint: how many display frames had parsable params?
+        n_disp = int(np.sum([x is not None for x in cond_key_for_uix]))
+        raise ValueError(f"No ON presentations detected after grouping by condition (parsable display states: {n_disp})")
 
-    # Build rows with parameters from the condition key
     rows = []
     for i, (f_on, f_off) in enumerate(zip(onset_frames, offset_frames), start=1):
-        key = cond_stream[f_on]  # tuple (sf, tf, dire, con, radius)
+        key = cond_stream[f_on]  # (sf, tf, dire, con, radius)
         if key is None:
-            # Shouldn't happen given onset_mask definition, but be safe
             sf=tf=dire=con=rad=np.nan
         else:
             sf, tf, dire, con, rad = key
@@ -292,7 +339,7 @@ def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
             "onset_frame": int(f_on),
             "offset_frame": int(f_off),
             "onset_time_s": float(f_on * dt),
-            "offset_time_s": float((f_off + 1) * dt),  # end boundary after last frame
+            "offset_time_s": float((f_off + 1) * dt),
             "sf": sf, "tf": tf, "dire": dire, "con": con, "radius": rad,
             "measured_frames": int(f_off - f_on + 1),
         })
@@ -310,6 +357,7 @@ def extract_DriftingGratingCircle(stim_key, stim_log, ctx):
             df[k] = [v] * len(df)
 
     return df
+
 
 
 
