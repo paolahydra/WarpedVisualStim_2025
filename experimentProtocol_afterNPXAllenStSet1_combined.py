@@ -46,15 +46,16 @@ ds_user_id = 'USER'
 
 ds_is_by_index = True
 ds_is_interpolate = False
-ds_is_triggered = False
 ds_is_save_sequence = True
+
+ds_is_triggered = False
 ds_trigger_event = "negative_edge"
 ds_trigger_NI_dev = 'Dev1'
-ds_trigger_NI_port = 1
+ds_trigger_NI_port = 0
 ds_trigger_NI_line = 0
-ds_is_sync_pulse = False
+ds_is_sync_pulse = True
 ds_sync_pulse_NI_dev = 'Dev1'
-ds_sync_pulse_NI_port = 1
+ds_sync_pulse_NI_port = 0
 ds_sync_pulse_NI_line = 1
 ds_initial_background_color = 0.
 ds_color_weights = (1., 1., 1.)
@@ -105,10 +106,6 @@ ds = DisplaySequence(log_dir=ds_log_dir, backupdir=ds_backupdir,
 # ================ Receptive field mapping - drifting gratings gabor ================ 
 
 # input center parameters
-# x_range = (5.0, 115.0)    # [xmin, xmax]
-# y_range = (25.0, -25.0)   # preserves given orientation (top→bottom)
-# n_x = 11                  # how much you want to tile x axis
-# n_y = 5                   # how much you want to tile y axis
 # #alternative 1:
 x_range = (7.5, 112.5)   # [xmin, xmax]
 y_range = (37.5, -37.5)   # preserves given orientation (top→bottom)
@@ -119,6 +116,7 @@ n_y = 5                   # how much you want to tile y axis
 # y_range = (52.5, -52.5)   # preserves given orientation (top→bottom)
 # n_x = 9                   # how much you want to tile x axis
 # n_y = 7                   # how much you want to tile y axis
+
 # calculate grid of centers
 x_edges = np.linspace(x_range[0], x_range[1], n_x + 1)
 y_edges = np.linspace(y_range[0], y_range[1], n_y + 1)
@@ -128,9 +126,7 @@ print(x_centers)
 print(y_centers)
 # n x n grid of centers, then flatten to list of tuples (x,y)
 Xc, Yc = np.meshgrid(x_centers, y_centers, indexing='xy')  # shape (n_x, n_y)
-
-
-rf_center_list = list(map(tuple, np.column_stack([Xc.ravel(), Yc.ravel()])))
+rf_center_list = list(map(tuple, np.column_stack([Yc.ravel(), Xc.ravel()])))
 
 
 # directions used are not mentioned anywhere... nor how to handle it in analysis...
