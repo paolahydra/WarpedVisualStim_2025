@@ -48,7 +48,7 @@ ds_is_by_index = True
 ds_is_interpolate = False
 ds_is_save_sequence = True
 
-ds_is_triggered = False
+ds_is_triggered = True
 ds_trigger_event = "negative_edge"
 ds_trigger_NI_dev = 'Dev1'
 ds_trigger_NI_port = 0
