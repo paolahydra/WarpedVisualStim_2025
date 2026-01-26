@@ -5423,7 +5423,6 @@ class MovingBar(Stim):
         """
         frames = [[0, -1.]] * self.pregap_frame_num
         
-        # Calculate total movement distance
         total_frames = int(self.iterations * (self.monitor.refresh_rate / self.speed))
         bar_positions = np.linspace(0, self.monitor.deg_coord_x.shape[0] - self.bar_width, total_frames)
 
@@ -5468,7 +5467,7 @@ class MovingBar(Stim):
 
             full_seq[i] = curr_FC_seq
 
-        return full_seq, full_dict  # Create full_dict as needed
+        return full_seq, {}  # Create full_dict as needed
 
     def generate_movie_by_index(self):
         """ Compute the stimulus movie to be displayed by index. """
@@ -5491,12 +5490,17 @@ class MovingBar(Stim):
 
         full_sequence = self.background * np.ones((num_frames, num_pixels_width, num_pixels_height), dtype=np.float32)
 
+        # Get indicator range here
+        indicator_width_min, indicator_width_max, \
+        indicator_height_min, indicator_height_max = self.get_indicator_range()
+
         for i, frame in enumerate(self.frames_unique):
             if frame[0] == 1:
                 bar_start = int(i * self.speed) % (num_pixels_width - self.bar_width)
-                full_sequence[i, :, bar_start:bar_start + int(self.bar_width)] = -1  # Set bar color
+                full_sequence[i, indicator_height_min:indicator_height_max, 
+                              bar_start:bar_start + int(self.bar_width)] = -1  # Set bar color
 
-            full_sequence[i, indicator_height_min:indicator_height_max,
+            full_sequence[i, indicator_height_min:indicator_height_max, \
                           indicator_width_min:indicator_width_max] = frame[1]
 
         return full_sequence, index_to_display  # Return the full sequence and the indices
