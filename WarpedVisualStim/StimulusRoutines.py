@@ -5423,9 +5423,9 @@ class MovingBar(Stim):
         """
         frames = [[0, -1.]] * self.pregap_frame_num
         
-        # Calculate the total movement distance
-        total_frames = self.monitor.refresh_rate * (self.iterations * (self.monitor.refresh_rate / self.speed))
-        bar_positions = np.linspace(0, self.monitor.deg_coord_x.shape[0] - self.bar_width, int(total_frames))
+        # Calculate total movement distance
+        total_frames = int(self.iterations * (self.monitor.refresh_rate / self.speed))
+        bar_positions = np.linspace(0, self.monitor.deg_coord_x.shape[0] - self.bar_width, total_frames)
 
         for iter in range(self.iterations):
             for pos in bar_positions:
@@ -5458,16 +5458,45 @@ class MovingBar(Stim):
             if curr_frame[0] == 0:
                 curr_FC_seq = background
             else:
-                # Create the moving bar
                 bar_start = int(i * self.speed) % (self.monitor.deg_coord_x.shape[0] - self.bar_width)
                 curr_FC_seq = background.copy()
                 curr_FC_seq[indicator_height_min:indicator_height_max, 
                              bar_start:bar_start + int(self.bar_width)] = -1.  # Bar color
 
-            # Update indicator area
             curr_FC_seq[indicator_height_min:indicator_height_max,
                          indicator_width_min:indicator_width_max] = curr_frame[1]
 
             full_seq[i] = curr_FC_seq
 
-        return full_seq, full_dict  # Similarly create full_dict as in the original class
+        return full_seq, full_dict  # Create full_dict as needed
+
+    def generate_movie_by_index(self):
+        """ Compute the stimulus movie to be displayed by index. """
+
+        # Compute unique frame parameters
+        self.frames_unique = self.generate_frames()
+        index_to_display = [0] * self.pregap_frame_num
+
+        for iter in range(self.iterations):
+            for pos in range(len(self.frames_unique) // 2):
+                index_to_display.append(1)  # Display bar
+                index_to_display.append(0)  # Hide bar
+
+        index_to_display += [0] * self.postgap_frame_num
+        index_to_display = index_to_display[self.pregap_frame_num:]  # Remove initial gaps
+
+        num_frames = len(self.frames_unique)
+        num_pixels_width = self.monitor.deg_coord_x.shape[0]
+        num_pixels_height = self.monitor.deg_coord_x.shape[1]
+
+        full_sequence = self.background * np.ones((num_frames, num_pixels_width, num_pixels_height), dtype=np.float32)
+
+        for i, frame in enumerate(self.frames_unique):
+            if frame[0] == 1:
+                bar_start = int(i * self.speed) % (num_pixels_width - self.bar_width)
+                full_sequence[i, :, bar_start:bar_start + int(self.bar_width)] = -1  # Set bar color
+
+            full_sequence[i, indicator_height_min:indicator_height_max,
+                          indicator_width_min:indicator_width_max] = frame[1]
+
+        return full_sequence, index_to_display  # Return the full sequence and the indices
