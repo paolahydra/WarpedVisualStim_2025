@@ -5365,43 +5365,21 @@ class RandomizedUniformFlashes(Stim):
         return full_seq, full_dict
 
 
-class MovingBar(Stim):
+class MovingBarMultiple(Stim):
     """
-    Full-field moving bar stimulus.
+    Full-field moving bar stimulus with multiple parameter lists.
 
-    A bar sweeps across the screen along `direction` at `speed`.
-    The bar is oriented perpendicular to the motion direction.
+    Builds the cartesian product of parameter lists to define "conditions" (one sweep),
+    repeats each condition `repetition` times, shuffles, and presents for `iteration` iterations.
 
-    Parameters
-    ----------
-    monitor, indicator : objects
-        Same as other Stim subclasses.
-    coordinate : {'degree','linear'}
-        Uses monitor.deg_coord_* or monitor.lin_coord_* maps.
-    background : float in [-1, 1]
-        Background luminance.
-    pregap_dur, postgap_dur : float (s)
-        Gap durations.
-    width : float
-        Bar width in coordinate units (deg if coordinate='degree').
-    direction : float (deg)
-        Motion direction in the (azimuth, altitude) plane:
-            0   -> +azimuth
-            90  -> +altitude
-            180 -> -azimuth
-            270 -> -altitude
-    speed : float (>0)
-        Bar speed in coordinate units per second (deg/s if coordinate='degree').
-    contrast : float in [0,1]
-        Contrast magnitude relative to background (used only if bar_color is None).
-    polarity : {'bright','dark'} or +1/-1
-        Bright or dark bar relative to background (used only if bar_color is None).
-    bar_color : float in [-1,1] or None
-        If provided, overrides contrast/polarity and sets bar luminance directly.
-    stim_dur : float or None
-        If None, computes duration for one full sweep across the visible map.
-    iteration : int
-        Number of repeated sweeps (back-to-back).
+    Tracking fields (for analysis/logging)
+    -------------------------------------
+    self.all_conditions             # list of condition tuples WITH ids (unshuffled)
+    self.all_conditions_shuffled    # flattened realized order across all iterations (params only, no id)
+    self.condition_table            # list indexed by condition_id -> params tuple (no id)
+    self.condition_orders_params    # per-iteration realized order (params, no id)
+    self.condition_orders_ids       # per-iteration realized order (condition_id)
+    self.condition_ids_shuffled     # flattened realized order across all iterations (condition_id)
     """
 
     def __init__(self,
@@ -5411,363 +5389,398 @@ class MovingBar(Stim):
                  background=0.,
                  pregap_dur=2.,
                  postgap_dur=3.,
-                 width=10.,
-                 direction=0.,
-                 speed=40.,
-                 contrast=1.0,
-                 polarity='dark',
-                 bar_color=None,
-                 stim_dur=None,
+                 midgap_dur=0.5,
+                 # parameter lists
+                 width_list=(10.,),
+                 direction_list=(0.,),
+                 speed_list=(40.,),
+                 contrast_list=(1.0,),
+                 polarity_list=('dark',),
+                 bar_color_list=(None,),   # if not None, overrides contrast/polarity for that condition
+                 stim_dur_list=(None,),    # None -> auto full sweep for that condition
+                 # repetition / iterations
+                 repetition=1,
                  iteration=1):
 
-        super(MovingBar, self).__init__(monitor=monitor,
-                                        indicator=indicator,
-                                        background=background,
-                                        coordinate=coordinate,
-                                        pregap_dur=pregap_dur,
-                                        postgap_dur=postgap_dur)
+        super(MovingBarMultiple, self).__init__(monitor=monitor,
+                                               indicator=indicator,
+                                               background=background,
+                                               coordinate=coordinate,
+                                               pregap_dur=pregap_dur,
+                                               postgap_dur=postgap_dur)
 
-        self.stim_name = 'MovingBar'
-        self.width = float(width)
-        self.direction = float(direction)
-        self.speed = float(speed)
-        self.contrast = float(contrast)
-        self.polarity = polarity
-        self.bar_color = bar_color if (bar_color is None) else float(bar_color)
-        self.stim_dur = stim_dur if (stim_dur is None) else float(stim_dur)
+        self.stim_name = 'MovingBarMultiple'
+
+        self.width_list = list(width_list)
+        self.direction_list = list(direction_list)
+        self.speed_list = list(speed_list)
+        self.contrast_list = list(contrast_list)
+        self.polarity_list = list(polarity_list)
+        self.bar_color_list = list(bar_color_list)
+        self.stim_dur_list = list(stim_dur_list)
+
+        self.midgap_dur = float(midgap_dur)
+        self.repetition = int(repetition)
         self.iteration = int(iteration)
 
-        if self.width <= 0:
-            raise ValueError('width must be > 0.')
-        if self.speed <= 0:
-            raise ValueError('speed must be > 0.')
-        if not (0.0 <= self.contrast <= 1.0):
-            raise ValueError('contrast must be within [0, 1].')
+        if self.repetition <= 0:
+            raise ValueError("repetition must be >= 1")
         if self.iteration <= 0:
-            raise ValueError('iteration must be >= 1.')
+            raise ValueError("iteration must be >= 1")
+        if self.midgap_dur < 0:
+            raise ValueError("midgap_dur must be >= 0")
 
-        self.frame_config = ('is_display', 'indicator color [-1., 1.]')
+        for w in self.width_list:
+            if float(w) <= 0:
+                raise ValueError("All widths must be > 0")
+        for s in self.speed_list:
+            if float(s) <= 0:
+                raise ValueError("All speeds must be > 0")
+        for c in self.contrast_list:
+            if float(c) < 0 or float(c) > 1:
+                raise ValueError("All contrasts must be within [0,1]")
+
+        # --- tracking for analysis ---
+        self.all_conditions = None
+        self.all_conditions_shuffled = None
+        self.condition_table = None
+        self.condition_orders_params = []
+        self.condition_orders_ids = []
+        self.condition_ids_shuffled = None
+
+        # frame tuple config (explicitly includes condition_id + condition params)
+        self.frame_config = (
+            'is_display',
+            'condition_id',
+            'indicator color [-1,1]',
+            'bar_center (proj units)',
+            'width',
+            'direction',
+            'speed',
+            'contrast',
+            'polarity',
+            'bar_color',
+            'stim_dur'
+        )
+
         self.clear()
 
-    def set_width(self, width):
-        self.width = float(width)
-        self.clear()
+    @property
+    def midgap_frame_num(self):
+        return int(self.midgap_dur * self.monitor.refresh_rate)
 
-    def set_direction(self, direction):
-        self.direction = float(direction)
-        self.clear()
-
-    def set_speed(self, speed):
-        self.speed = float(speed)
-        self.clear()
-
-    def set_contrast(self, contrast):
-        self.contrast = float(contrast)
-        self.clear()
-
-    def set_bar_color(self, bar_color):
-        self.bar_color = None if (bar_color is None) else float(bar_color)
-        self.clear()
-
-    def set_stim_dur(self, stim_dur):
-        self.stim_dur = None if (stim_dur is None) else float(stim_dur)
-        self.clear()
+    def _get_coord_maps(self):
+        if self.coordinate == 'degree':
+            return self.monitor.deg_coord_x, self.monitor.deg_coord_y
+        elif self.coordinate == 'linear':
+            return self.monitor.lin_coord_x, self.monitor.lin_coord_y
+        else:
+            raise LookupError("`coordinate` not in {'linear','degree'}")
 
     @staticmethod
     def _clip01(x):
         return np.minimum(1.0, np.maximum(0.0, x))
 
-    def _compute_bar_luminance(self):
+    def _bar_luminance(self, background, contrast, polarity, bar_color):
         """
-        Convert (background, contrast, polarity) into a bar luminance in [-1, 1].
-        If bar_color is provided, use it directly.
-
-        Convention: map luminance [-1,1] <-> intensity [0,1] via I=(L+1)/2.
-        For bright: Ibar = Ibg + contrast*(1 - Ibg)
-        For dark:   Ibar = Ibg*(1 - contrast)
+        Return bar luminance in [-1,1].
+        If bar_color is not None, it is used directly.
+        Else uses background + (contrast, polarity) in intensity space:
+            I = (L + 1)/2
+            bright: Ibar = Ibg + con*(1-Ibg)
+            dark:   Ibar = Ibg*(1-con)
         """
-        if self.bar_color is not None:
-            if self.bar_color < -1.0 or self.bar_color > 1.0:
-                raise ValueError('bar_color must be within [-1, 1].')
-            return float(self.bar_color)
+        if bar_color is not None:
+            bc = float(bar_color)
+            if bc < -1.0 or bc > 1.0:
+                raise ValueError("bar_color must be in [-1,1]")
+            return bc
 
-        Lbg = float(self.background)
+        Lbg = float(background)
         Ibg = (Lbg + 1.0) / 2.0
 
-        pol = self.polarity
+        pol = polarity
         if isinstance(pol, str):
             pol = pol.lower()
             if pol not in ('bright', 'dark'):
-                raise ValueError("polarity must be 'bright' or 'dark' (or +1/-1).")
+                raise ValueError("polarity must be 'bright' or 'dark' (or +1/-1)")
+            pol_is_bright = (pol == 'bright')
         else:
-            # numeric polarity: +1 bright, -1 dark
-            pol = 'bright' if float(pol) >= 0 else 'dark'
+            pol_is_bright = (float(pol) >= 0)
 
-        if pol == 'bright':
-            Ibar = Ibg + self.contrast * (1.0 - Ibg)
+        con = float(contrast)
+        if con < 0.0 or con > 1.0:
+            raise ValueError("contrast must be in [0,1]")
+
+        if pol_is_bright:
+            Ibar = Ibg + con * (1.0 - Ibg)
         else:
-            Ibar = Ibg * (1.0 - self.contrast)
+            Ibar = Ibg * (1.0 - con)
 
         Ibar = self._clip01(Ibar)
-        Lbar = 2.0 * Ibar - 1.0
-        return float(Lbar)
+        return float(2.0 * Ibar - 1.0)
 
-    def _get_coord_maps(self):
-        if self.coordinate == 'degree':
-            map_azi = self.monitor.deg_coord_x
-            map_alt = self.monitor.deg_coord_y
-        elif self.coordinate == 'linear':
-            map_azi = self.monitor.lin_coord_x
-            map_alt = self.monitor.lin_coord_y
-        else:
-            raise LookupError("`coordinate` not in {'linear','degree'}")
-        return map_azi, map_alt
-
-    def _compute_sweep_duration(self, map_azi, map_alt):
+    def _compute_sweep_duration(self, map_azi, map_alt, width, direction, speed):
         """
-        If stim_dur is None, compute a duration that sweeps the bar fully across the
-        visible region along the motion axis.
+        Auto duration for one full sweep across visible region along motion axis.
+        Returns (dur, proj_min, proj_max).
         """
-        theta = np.deg2rad(self.direction)
-        u = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)  # motion axis in (azi, alt)
-
-        proj = map_azi * u[0] + map_alt * u[1]
-        proj_min = float(np.min(proj))
-        proj_max = float(np.max(proj))
-
-        travel = (proj_max - proj_min) + self.width  # start just outside, end just outside
-        dur = travel / self.speed
-        return max(dur, 1.0 / self.monitor.refresh_rate), proj_min, proj_max
-
-    def generate_movie(self):
-        """
-        Generate the full stimulus movie frame-by-frame.
-        (Index-based generation isn't very helpful here because each frame has a unique bar position.)
-        """
-
-        # geometry + luminance
-        map_azi, map_alt = self._get_coord_maps()
-        Lbar = self._compute_bar_luminance()
-
-        # indicator ROI
-        indicator_width_min, indicator_width_max, \
-        indicator_height_min, indicator_height_max = self.get_indicator_range()
-
-        # determine sweep duration
-        if self.stim_dur is None:
-            sweep_dur, proj_min, proj_max = self._compute_sweep_duration(map_azi, map_alt)
-        else:
-            sweep_dur = float(self.stim_dur)
-            # still need proj_min/proj_max to place start; compute once
-            theta = np.deg2rad(self.direction)
-            u = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
-            proj = map_azi * u[0] + map_alt * u[1]
-            proj_min = float(np.min(proj))
-            proj_max = float(np.max(proj))
-
-        stim_frame_num = int(np.round(sweep_dur * self.monitor.refresh_rate))
-        stim_frame_num = max(stim_frame_num, 1)
-
-        # build the timeline (gap + sweeps + gap)
-        total_frames = self.pregap_frame_num + self.iteration * stim_frame_num + self.postgap_frame_num
-
-        H = map_azi.shape[0]
-        W = map_azi.shape[1]
-        full_seq = np.ones((total_frames, H, W), dtype=np.float32) * self.background
-
-        # indicator color per frame (sync or not)
-        # match your other conventions: if sync, during stimulus indicator is 1, else -1.
-        def indicator_value(global_frame_index, is_stim):
-            if self.indicator.is_sync:
-                return 1.0 if is_stim else -1.0
-            else:
-                # alternate at indicator.freq via indicator.frame_num like your FlashingCircle
-                if np.floor(global_frame_index // self.indicator.frame_num) % 2 == 0:
-                    return 1.0
-                else:
-                    return -1.0
-
-        # motion axis
-        theta = np.deg2rad(self.direction)
+        theta = np.deg2rad(direction)
         u0 = np.cos(theta).astype(np.float32)
         u1 = np.sin(theta).astype(np.float32)
-        proj = map_azi * u0 + map_alt * u1  # dot(p, u)
 
-        # bar center starts outside one edge and advances
-        start_center = proj_min - self.width / 2.0
-        # end_center would be proj_max + self.width/2.0 (implicit via speed*dur)
-
-        # fill frames
-        t0 = self.pregap_frame_num
-        for it in range(self.iteration):
-            for k in range(stim_frame_num):
-                gi = t0 + it * stim_frame_num + k  # global frame index
-                # time (s) since this sweep started
-                tt = k / self.monitor.refresh_rate
-                center = start_center + self.speed * tt
-
-                # bar mask: |dot(p,u) - center| <= width/2
-                mask = np.abs(proj - center) <= (self.width / 2.0)
-
-                # apply bar
-                full_seq[gi, mask] = Lbar
-
-                # indicator overlay
-                ind_val = indicator_value(gi, is_stim=True)
-                full_seq[gi,
-                         indicator_height_min:indicator_height_max,
-                         indicator_width_min:indicator_width_max] = ind_val
-
-        # pregap + postgap indicator overlay
-        for gi in range(0, self.pregap_frame_num):
-            ind_val = indicator_value(gi, is_stim=False)
-            full_seq[gi,
-                     indicator_height_min:indicator_height_max,
-                     indicator_width_min:indicator_width_max] = ind_val
-
-        for gi in range(self.pregap_frame_num + self.iteration * stim_frame_num, total_frames):
-            ind_val = indicator_value(gi, is_stim=False)
-            full_seq[gi,
-                     indicator_height_min:indicator_height_max,
-                     indicator_width_min:indicator_width_max] = ind_val
-
-        # package metadata like your other stimuli
-        mondict = dict(self.monitor.__dict__)
-        indicator_dict = dict(self.indicator.__dict__)
-        indicator_dict.pop('monitor', None)
-        NFdict = dict(self.__dict__)
-        NFdict.pop('monitor', None)
-        NFdict.pop('indicator', None)
-
-        full_dict = {'stimulation': NFdict,
-                     'monitor': mondict,
-                     'indicator': indicator_dict}
-
-        return full_seq, full_dict
-    
-    def _generate_frames_for_index_display(self):
-        """
-        Build per-frame parameter tuples:
-            (is_display, indicator_color, bar_center)
-        We include bar_center so each frame can be rendered from parameters.
-        """
-        map_azi, map_alt = self._get_coord_maps()
-        _ = self._compute_bar_luminance()  # validate color params
-
-        # determine sweep duration and projection bounds
-        theta = np.deg2rad(self.direction)
-        u0 = np.cos(theta).astype(np.float32)
-        u1 = np.sin(theta).astype(np.float32)
         proj = map_azi * u0 + map_alt * u1
         proj_min = float(np.min(proj))
         proj_max = float(np.max(proj))
 
-        if self.stim_dur is None:
-            travel = (proj_max - proj_min) + self.width
-            sweep_dur = max(travel / self.speed, 1.0 / self.monitor.refresh_rate)
+        travel = (proj_max - proj_min) + float(width)
+        dur = travel / float(speed)
+        dur = max(dur, 1.0 / self.monitor.refresh_rate)
+        return dur, proj_min, proj_max
+
+    def _generate_all_conditions(self):
+        """
+        Cartesian product of all parameter lists, with stable integer ids.
+
+        Returns
+        -------
+        all_conditions : list of tuples
+            (condition_id, width, direction, speed, contrast, polarity, bar_color, stim_dur)
+        """
+        raw = [
+            (w, d, s, c, p, bc, sd)
+            for w in self.width_list
+            for d in self.direction_list
+            for s in self.speed_list
+            for c in self.contrast_list
+            for p in self.polarity_list
+            for bc in self.bar_color_list
+            for sd in self.stim_dur_list
+        ]
+        return [(i,) + cond for i, cond in enumerate(raw)]
+
+    def _indicator_value(self, global_frame_index, is_stim):
+        if self.indicator.is_sync:
+            return 1.0 if is_stim else -1.0
         else:
-            sweep_dur = float(self.stim_dur)
-
-        stim_frame_num = int(np.round(sweep_dur * self.monitor.refresh_rate))
-        stim_frame_num = max(stim_frame_num, 1)
-
-        start_center = proj_min - self.width / 2.0
-
-        # helper for indicator color, matching your other stimuli
-        def indicator_value(global_frame_index, is_stim):
-            if self.indicator.is_sync:
-                return 1.0 if is_stim else -1.0
+            if np.floor(global_frame_index // self.indicator.frame_num) % 2 == 0:
+                return 1.0
             else:
-                if np.floor(global_frame_index // self.indicator.frame_num) % 2 == 0:
-                    return 1.0
-                else:
-                    return -1.0
+                return -1.0
+
+    def _generate_frames_for_index_display(self):
+        """
+        Build per-frame tuples for the entire experiment timeline.
+
+        Each frame tuple:
+          (is_display, condition_id, indicator_color, center, width, direction, speed,
+           contrast, polarity, bar_color, stim_dur)
+
+        Gap frames use condition_id = -1 and params None.
+        """
+        map_azi, map_alt = self._get_coord_maps()
+
+        all_conditions = self._generate_all_conditions()
+        self.all_conditions = list(all_conditions)
+
+        # condition_table indexed by id -> (width, direction, speed, contrast, polarity, bar_color, stim_dur)
+        self.condition_table = [cond[1:] for cond in all_conditions]
 
         frames = []
 
         # pregap
         for gi in range(self.pregap_frame_num):
-            frames.append((0, indicator_value(gi, False), np.nan))
+            frames.append((0, -1, self._indicator_value(gi, False), np.nan,
+                           None, None, None, None, None, None, None))
 
-        # stimulus sweeps
-        base = self.pregap_frame_num
+        global_frame = self.pregap_frame_num
+
+        # realized orders
+        all_shuffled_flat_params = []
+        all_shuffled_flat_ids = []
+        self.condition_orders_params = []
+        self.condition_orders_ids = []
+
         for it in range(self.iteration):
-            for k in range(stim_frame_num):
-                gi = base + it * stim_frame_num + k
-                tt = k / self.monitor.refresh_rate
-                center = start_center + self.speed * tt
-                frames.append((1, indicator_value(gi, True), float(center)))
+
+            if it > 0:
+                for _ in range(self.midgap_frame_num):
+                    frames.append((0, -1, self._indicator_value(global_frame, False), np.nan,
+                                   None, None, None, None, None, None, None))
+                    global_frame += 1
+
+            # repeat each condition `repetition` times, then shuffle
+            conds_rep = []
+            for cond in all_conditions:
+                conds_rep.extend([cond] * self.repetition)
+            random.shuffle(conds_rep)
+
+            iter_ids = [c[0] for c in conds_rep]
+            iter_params = [c[1:] for c in conds_rep]
+            self.condition_orders_ids.append(list(iter_ids))
+            self.condition_orders_params.append(list(iter_params))
+
+            all_shuffled_flat_ids.extend(iter_ids)
+            all_shuffled_flat_params.extend(iter_params)
+
+            for ci, cond in enumerate(conds_rep):
+
+                if not (it == 0 and ci == 0):
+                    for _ in range(self.midgap_frame_num):
+                        frames.append((0, -1, self._indicator_value(global_frame, False), np.nan,
+                                       None, None, None, None, None, None, None))
+                        global_frame += 1
+
+                condition_id, width, direction, speed, contrast, polarity, bar_color, stim_dur = cond
+
+                # validate luminance params once per condition
+                _ = self._bar_luminance(self.background, contrast, polarity, bar_color)
+
+                # duration + projection min
+                if stim_dur is None:
+                    sweep_dur, proj_min, _ = self._compute_sweep_duration(
+                        map_azi, map_alt, width, direction, speed
+                    )
+                else:
+                    sweep_dur = float(stim_dur)
+                    theta = np.deg2rad(direction)
+                    u0 = np.cos(theta).astype(np.float32)
+                    u1 = np.sin(theta).astype(np.float32)
+                    proj = map_azi * u0 + map_alt * u1
+                    proj_min = float(np.min(proj))
+
+                stim_frame_num = int(np.round(sweep_dur * self.monitor.refresh_rate))
+                stim_frame_num = max(stim_frame_num, 1)
+
+                start_center = proj_min - float(width) / 2.0
+
+                for k in range(stim_frame_num):
+                    tt = k / self.monitor.refresh_rate
+                    center = start_center + float(speed) * tt
+
+                    frames.append((1,
+                                   int(condition_id),
+                                   self._indicator_value(global_frame, True),
+                                   float(center),
+                                   float(width), float(direction), float(speed),
+                                   float(contrast), polarity,
+                                   None if (bar_color is None) else float(bar_color),
+                                   None if (stim_dur is None) else float(stim_dur)))
+                    global_frame += 1
+
+        self.all_conditions_shuffled = list(all_shuffled_flat_params)
+        self.condition_ids_shuffled = list(all_shuffled_flat_ids)
 
         # postgap
-        base2 = self.pregap_frame_num + self.iteration * stim_frame_num
-        for gi in range(base2, base2 + self.postgap_frame_num):
-            frames.append((0, indicator_value(gi, False), np.nan))
+        for _ in range(self.postgap_frame_num):
+            frames.append((0, -1, self._indicator_value(global_frame, False), np.nan,
+                           None, None, None, None, None, None, None))
+            global_frame += 1
 
         return tuple(frames)
 
-
     def _generate_display_index(self):
-        """
-        Since each frame is unique, index_to_display is just [0..N-1].
-        """
-        # Ensure frames_unique exists to compute its length
-        if not hasattr(self, "frames_unique"):
+        if not hasattr(self, 'frames_unique'):
             self.frames_unique = self._generate_frames_for_index_display()
         return list(range(len(self.frames_unique)))
 
-
     def generate_movie_by_index(self):
         """
-        Compute the stimulus movie using indexed frames.
-
-        For MovingBar, frames are essentially all unique (bar center shifts each frame),
-        but this keeps the same interface as your other stimuli.
+        Render movie from frames_unique with:
+          - projection cache prefilled for directions actually used (few directions)
+          - bar luminance cache for (contrast, polarity, bar_color)
         """
-        # compute unique frame parameters and indices
         self.frames_unique = self._generate_frames_for_index_display()
         self.index_to_display = self._generate_display_index()
 
-        # geometry + luminance
         map_azi, map_alt = self._get_coord_maps()
-        Lbar = self._compute_bar_luminance()
+        H, W = map_azi.shape
 
-        # indicator ROI
         indicator_width_min, indicator_width_max, \
         indicator_height_min, indicator_height_max = self.get_indicator_range()
 
-        # motion axis projection (precompute once)
-        theta = np.deg2rad(self.direction)
-        u0 = np.cos(theta).astype(np.float32)
-        u1 = np.sin(theta).astype(np.float32)
-        proj = map_azi * u0 + map_alt * u1
+        mov = np.ones((len(self.frames_unique), H, W), dtype=np.float32) * self.background
 
-        H, W = map_azi.shape
-        num_frames = len(self.frames_unique)
-        full_sequence = np.ones((num_frames, H, W), dtype=np.float32) * self.background
+        # --- caches ---
+        proj_cache = {}   # direction_key -> proj
+        lum_cache = {}    # (contrast, polarity, bar_color) -> Lbar
 
-        for i, frame in enumerate(self.frames_unique):
-            is_display, ind_val, center = frame
+        def dir_key(direction):
+            return float(np.round(direction, 6))
 
-            if is_display == 1:
-                mask = np.abs(proj - center) <= (self.width / 2.0)
-                full_sequence[i, mask] = Lbar
+        def get_lbar(contrast, polarity, bar_color):
+            key = (float(np.round(contrast, 6)),
+                   polarity if isinstance(polarity, str) else float(polarity),
+                   None if (bar_color is None) else float(np.round(bar_color, 6)))
+            if key not in lum_cache:
+                lum_cache[key] = self._bar_luminance(self.background, contrast, polarity, bar_color)
+            return lum_cache[key]
 
-            # indicator overlay
-            full_sequence[i,
-                        indicator_height_min:indicator_height_max,
-                        indicator_width_min:indicator_width_max] = ind_val
+        # --- prefill projection cache for used directions ---
+        used_dir_keys = set()
+        if self.condition_ids_shuffled is not None and self.condition_table is not None:
+            for cid in self.condition_ids_shuffled:
+                direction = self.condition_table[int(cid)][1]  # (width, direction, speed, ...)
+                used_dir_keys.add(dir_key(direction))
+        else:
+            for fr in self.frames_unique:
+                if fr[0] == 1:
+                    used_dir_keys.add(dir_key(fr[5]))
 
-        # metadata bundle (same style as your other stimuli)
+        for dk in used_dir_keys:
+            theta = np.deg2rad(dk)
+            u0 = np.cos(theta).astype(np.float32)
+            u1 = np.sin(theta).astype(np.float32)
+            proj_cache[dk] = map_azi * u0 + map_alt * u1
+
+        # --- render ---
+        for i, fr in enumerate(self.frames_unique):
+            # (is_display, condition_id, indicator_color, center, width, direction, speed, contrast, polarity, bar_color, stim_dur)
+            is_disp, cond_id, ind_val, center, width, direction, speed, contrast, polarity, bar_color, stim_dur = fr
+
+            if is_disp == 1:
+                proj = proj_cache[dir_key(direction)]
+                Lbar = get_lbar(contrast, polarity, bar_color)
+                mask = np.abs(proj - center) <= (width / 2.0)
+                mov[i, mask] = Lbar
+
+            mov[i,
+                indicator_height_min:indicator_height_max,
+                indicator_width_min:indicator_width_max] = ind_val
+
+        # --- log dict (include condition metadata) ---
+        self_dict = dict(self.__dict__)
+        for k in ('monitor', 'indicator'):
+            self_dict.pop(k, None)
+
+        self_dict['all_conditions'] = list(self._generate_all_conditions())
+        self_dict['all_conditions_shuffled'] = getattr(self, 'all_conditions_shuffled', None)
+        self_dict['condition_table'] = getattr(self, 'condition_table', None)
+        self_dict['condition_orders_ids'] = getattr(self, 'condition_orders_ids', None)
+        self_dict['condition_orders_params'] = getattr(self, 'condition_orders_params', None)
+        self_dict['condition_ids_shuffled'] = getattr(self, 'condition_ids_shuffled', None)
+
         mondict = dict(self.monitor.__dict__)
         indicator_dict = dict(self.indicator.__dict__)
         indicator_dict.pop('monitor', None)
-        NFdict = dict(self.__dict__)
-        NFdict.pop('monitor', None)
-        NFdict.pop('indicator', None)
 
-        full_dict = {'stimulation': NFdict,
-                    'monitor': mondict,
-                    'indicator': indicator_dict}
+        log = {'stimulation': self_dict,
+               'monitor': mondict,
+               'indicator': indicator_dict}
 
-        return full_sequence, full_dict
+        return mov, log
+
+    # Optional: keep API parity with other stimuli
+    def generate_frames(self):
+        """
+        Return frames timeline as tuples (same content as frames_unique).
+        """
+        self.frames = self._generate_frames_for_index_display()
+        return self.frames
+
+    def generate_movie(self):
+        """
+        For this stimulus, the indexed path is the canonical implementation.
+        """
+        return self.generate_movie_by_index()
 
